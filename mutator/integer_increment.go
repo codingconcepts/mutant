@@ -1,0 +1,48 @@
+package mutator
+
+import (
+	"go/ast"
+	"go/token"
+	"strconv"
+
+	"github.com/codingconcepts/mutant"
+)
+
+type integerIncrement struct{}
+
+func NewIntegerIncrement() *integerIncrement { return &integerIncrement{} }
+
+func (m *integerIncrement) Name() string { return "integer_increment" }
+
+func (m *integerIncrement) Mutate(fset *token.FileSet, file *ast.File, filePath string, original []byte) []mutant.Mutation {
+	var out []mutant.Mutation
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.INT {
+			return true
+		}
+
+		originalValue := lit.Value
+
+		v, err := strconv.Atoi(originalValue)
+		if err != nil {
+			return true
+		}
+
+		mutatedValue := strconv.Itoa(v + 1)
+		pos := fset.Position(lit.ValuePos)
+		out = append(out, mutant.Mutation{
+			File:        filePath,
+			Line:        pos.Line,
+			Mutator:     "integer_increment",
+			Description: "incremented " + originalValue + " to " + mutatedValue,
+			Apply:       func() { lit.Value = mutatedValue },
+			Revert:      func() { lit.Value = originalValue },
+		})
+
+		return true
+	})
+
+	return out
+}
