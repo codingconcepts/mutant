@@ -142,7 +142,7 @@ func IsPositive(n int) bool {
 	}
 }
 
-func TestWriteAndRestoreMutatedFile(t *testing.T) {
+func TestWriteMutatedToTemp(t *testing.T) {
 	src := `package testpkg
 
 func Add(a, b int) int {
@@ -191,16 +191,16 @@ func Add(a, b int) int {
 		Original: originalBytes,
 	}
 
-	// Apply mutation and write to disk
 	m.Apply()
+	defer m.Revert()
 
-	err = writeMutatedFile(m)
+	tmpPath, err := writeMutatedToTemp(m)
 	if err != nil {
-		t.Fatalf("writeMutatedFile: %v", err)
+		t.Fatalf("writeMutatedToTemp: %v", err)
 	}
+	defer os.Remove(tmpPath)
 
-	// Read mutated file — should be different
-	mutatedBytes, err := os.ReadFile(path)
+	mutatedBytes, err := os.ReadFile(tmpPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,66 +209,22 @@ func Add(a, b int) int {
 		t.Error("mutated file should differ from original")
 	}
 
-	// Verify mutation is present in file
-	mutatedStr := string(mutatedBytes)
-	if !containsSubstring(mutatedStr, "-") {
+	if !containsSubstring(string(mutatedBytes), "-") {
 		t.Error("mutated file should contain '-' operator")
 	}
 
-	// Restore original
-	m.Revert()
-	restoreFile(m)
-
-	restoredBytes, err := os.ReadFile(path)
+	// Original file must be untouched
+	diskBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !bytes.Equal(restoredBytes, originalBytes) {
-		t.Errorf("restored file does not match original.\nOriginal:\n%s\nRestored:\n%s",
-			originalBytes, restoredBytes)
+	if !bytes.Equal(diskBytes, originalBytes) {
+		t.Error("original file on disk should not be modified")
 	}
 }
 
-func TestRestoreFilePreservesExactBytes(t *testing.T) {
-	src := `package testpkg
-
-// This file has specific formatting
-func   Weird(   a,    b   int)    int {
-	return     a    +    b
-}
-`
-	tmp := t.TempDir()
-	path := filepath.Join(tmp, "weird.go")
-
-	originalBytes := []byte(src)
-	if err := os.WriteFile(path, originalBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := Mutation{
-		File:     path,
-		Original: originalBytes,
-	}
-
-	// Overwrite with different content
-	if err := os.WriteFile(path, []byte("corrupted"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	restoreFile(m)
-
-	restored, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !bytes.Equal(restored, originalBytes) {
-		t.Error("restoreFile did not preserve exact original bytes")
-	}
-}
-
-func TestWriteMutatedFileFormatsSource(t *testing.T) {
+func TestWriteMutatedToTempFormatsSource(t *testing.T) {
 	src := `package testpkg
 
 func Add(a, b int) int {
@@ -296,17 +252,17 @@ func Add(a, b int) int {
 		Original: []byte(src),
 	}
 
-	err = writeMutatedFile(m)
+	tmpPath, err := writeMutatedToTemp(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpPath)
+
+	written, err := os.ReadFile(tmpPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify output is gofmt-formatted
 	formatted, err := format.Source(written)
 	if err != nil {
 		t.Fatalf("written file is not valid Go: %v", err)
@@ -314,6 +270,24 @@ func Add(a, b int) int {
 
 	if !bytes.Equal(written, formatted) {
 		t.Error("written file is not gofmt-formatted")
+	}
+}
+
+func TestWriteOverlay(t *testing.T) {
+	tmpPath, err := writeOverlay("/original/path.go", "/replacement/path.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpPath)
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"Replace":{"/original/path.go":"/replacement/path.go"}}`
+	if string(data) != want {
+		t.Errorf("overlay content = %s, want %s", data, want)
 	}
 }
 

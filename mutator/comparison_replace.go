@@ -8,6 +8,24 @@ import (
 	"github.com/codingconcepts/mutant"
 )
 
+func appendSideReplace(out []mutant.Mutation, side string, current ast.Expr, set func(ast.Expr), replacement *ast.Ident, op token.Token, filePath string, pos token.Position) []mutant.Mutation {
+	if fmt.Sprint(current) == replacement.Name {
+		return out
+	}
+
+	original := current
+	repl := &ast.Ident{Name: replacement.Name, NamePos: original.Pos()}
+
+	return append(out, mutant.Mutation{
+		File:        filePath,
+		Line:        pos.Line,
+		Mutator:     "comparison_replace",
+		Description: "replaced " + side + " side of " + op.String() + " with " + replacement.Name,
+		Apply:       func() { set(repl) },
+		Revert:      func() { set(original) },
+	})
+}
+
 type comparisonReplace struct {
 	replacements map[token.Token]*ast.Ident
 }
@@ -39,31 +57,8 @@ func (m *comparisonReplace) Mutate(fset *token.FileSet, file *ast.File, filePath
 
 		pos := fset.Position(expr.OpPos)
 
-		if fmt.Sprint(expr.X) != replacement.Name {
-			originalX := expr.X
-			replX := &ast.Ident{Name: replacement.Name, NamePos: originalX.Pos()}
-			out = append(out, mutant.Mutation{
-				File:        filePath,
-				Line:        pos.Line,
-				Mutator:     "comparison_replace",
-				Description: "replaced left side of " + expr.Op.String() + " with " + replacement.Name,
-				Apply:       func() { expr.X = replX },
-				Revert:      func() { expr.X = originalX },
-			})
-		}
-
-		if fmt.Sprint(expr.Y) != replacement.Name {
-			originalY := expr.Y
-			replY := &ast.Ident{Name: replacement.Name, NamePos: originalY.Pos()}
-			out = append(out, mutant.Mutation{
-				File:        filePath,
-				Line:        pos.Line,
-				Mutator:     "comparison_replace",
-				Description: "replaced right side of " + expr.Op.String() + " with " + replacement.Name,
-				Apply:       func() { expr.Y = replY },
-				Revert:      func() { expr.Y = originalY },
-			})
-		}
+		out = appendSideReplace(out, "left", expr.X, func(e ast.Expr) { expr.X = e }, replacement, expr.Op, filePath, pos)
+		out = appendSideReplace(out, "right", expr.Y, func(e ast.Expr) { expr.Y = e }, replacement, expr.Op, filePath, pos)
 
 		return true
 	})

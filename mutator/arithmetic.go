@@ -8,12 +8,12 @@ import (
 )
 
 type arithmetic struct {
-	binaryExprMutator
+	tokenSwapMutator
 }
 
 func NewArithmetic() *arithmetic {
 	return &arithmetic{
-		binaryExprMutator{
+		tokenSwapMutator{
 			name: "arithmetic",
 			mutations: map[token.Token]token.Token{
 				token.ADD: token.SUB,
@@ -22,6 +22,7 @@ func NewArithmetic() *arithmetic {
 				token.QUO: token.MUL,
 				token.REM: token.MUL,
 			},
+			extract: extractBinaryExpr,
 		},
 	}
 }

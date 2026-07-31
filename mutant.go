@@ -52,7 +52,6 @@ func (s Status) MarshalJSON() ([]byte, error) {
 type Mutation struct {
 	File        string
 	RelFile     string
-	Line        int
 	Mutator     string
 	Description string
 	Apply       func()
@@ -60,14 +59,15 @@ type Mutation struct {
 	FileSet     *token.FileSet
 	ASTFile     *ast.File
 	Original    []byte
+	Line        int
 }
 
 type MutationResult struct {
+	TestOutput string
+	TestsRun   []string
 	Mutation   Mutation
 	Status     Status
-	TestsRun   []string
 	Duration   time.Duration
-	TestOutput string
 }
 
 type Mutator interface {
@@ -87,22 +87,22 @@ const (
 )
 
 type MutationProgress struct {
-	Phase     Phase
-	Message   string
 	Result    *MutationResult
 	Mutation  *Mutation
+	Message   string
+	Phase     Phase
 	Completed int
 	Total     int
 }
 
 type Config struct {
+	OnProgress func(MutationProgress)
 	Dir        string
 	Packages   []string
 	Mutators   []Mutator
 	Timeout    time.Duration
-	Verbose    bool
 	Workers    int
-	OnProgress func(MutationProgress)
+	Verbose    bool
 }
 
 var (
@@ -200,8 +200,8 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 	}
 
 	fileGroups := make(map[string][]int)
-	for i, m := range mutations {
-		fileGroups[m.File] = append(fileGroups[m.File], i)
+	for i := range mutations {
+		fileGroups[mutations[i].File] = append(fileGroups[mutations[i].File], i)
 	}
 
 	results := make([]MutationResult, len(mutations))
@@ -215,7 +215,6 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 	var wg sync.WaitGroup
 
 	for _, indices := range fileGroups {
-
 		wg.Add(1)
 
 		sem <- struct{}{}
@@ -228,6 +227,7 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 				if ctx.Err() != nil {
 					break
 				}
+
 				m := mutations[idx]
 				result := executeMutation(ctx, m, coverMap, cfg)
 				results[idx] = result
@@ -299,7 +299,11 @@ func CollectMutations(files []string, baseDir string, mutators []Mutator) ([]Mut
 		for _, m := range mutators {
 			mutations := m.Mutate(fset, file, path, content)
 			for i := range mutations {
-				rel, _ := filepath.Rel(baseDir, path)
+				rel, err := filepath.Rel(baseDir, path)
+				if err != nil {
+					return nil, fmt.Errorf("computing relative path for %s: %w", path, err)
+				}
+
 				mutations[i].RelFile = rel
 				mutations[i].FileSet = fset
 				mutations[i].ASTFile = file
@@ -326,15 +330,10 @@ func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg
 	}
 
 	m.Apply()
+	defer m.Revert()
 
-	RegisterMutation(&m)
-	defer func() {
-		UnregisterMutation(m.File)
-		m.Revert()
-		restoreFile(m)
-	}()
-
-	if err := writeMutatedFile(m); err != nil {
+	mutatedPath, err := writeMutatedToTemp(m)
+	if err != nil {
 		return MutationResult{
 			Mutation:   m,
 			Status:     Errored,
@@ -342,6 +341,26 @@ func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg
 			TestOutput: err.Error(),
 		}
 	}
+	defer func() {
+		if rmErr := os.Remove(mutatedPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(os.Stderr, "warning: removing temp file: %v\n", rmErr)
+		}
+	}()
+
+	overlayPath, err := writeOverlay(m.File, mutatedPath)
+	if err != nil {
+		return MutationResult{
+			Mutation:   m,
+			Status:     Errored,
+			Duration:   time.Since(start),
+			TestOutput: err.Error(),
+		}
+	}
+	defer func() {
+		if err := os.Remove(overlayPath); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: removing temp file: %v\n", err)
+		}
+	}()
 
 	testsByPkg := groupTestsByPackage(tests)
 	killed := false
@@ -354,7 +373,12 @@ func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg
 	for pkg, testNames := range testsByPkg {
 		pattern := "^(" + strings.Join(testNames, "|") + ")$"
 		testCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		cmd := exec.CommandContext(testCtx, "go", "test", "-count=1", "-run", pattern, pkg)
+		cmd := exec.CommandContext(testCtx, "go", "test",
+			"-overlay="+overlayPath,
+			"-count=1",
+			"-run", pattern,
+			pkg,
+		)
 		cmd.Dir = cfg.Dir
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -397,23 +421,81 @@ func groupTestsByPackage(tests []TestRef) map[string][]string {
 	return m
 }
 
-func writeMutatedFile(m Mutation) error {
+func writeMutatedToTemp(m Mutation) (string, error) {
 	var buf bytes.Buffer
 	if err := printer.Fprint(&buf, m.FileSet, m.ASTFile); err != nil {
-		return fmt.Errorf("printing mutated AST: %w", err)
+		return "", fmt.Errorf("printing mutated AST: %w", err)
 	}
 
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
-		return fmt.Errorf("formatting mutated source: %w", err)
+		return "", fmt.Errorf("formatting mutated source: %w", err)
 	}
 
-	return os.WriteFile(m.File, formatted, 0o644)
+	f, err := os.CreateTemp("", "mutant-*.go")
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := f.Write(formatted); err != nil {
+		if e := f.Close(); e != nil {
+			err = fmt.Errorf("%w (close: %w)", err, e)
+		}
+
+		if e := os.Remove(f.Name()); e != nil {
+			err = fmt.Errorf("%w (remove: %w)", err, e)
+		}
+
+		return "", err
+	}
+
+	if err := f.Close(); err != nil {
+		if e := os.Remove(f.Name()); e != nil {
+			err = fmt.Errorf("%w (remove: %w)", err, e)
+		}
+
+		return "", err
+	}
+
+	return f.Name(), nil
 }
 
-func restoreFile(m Mutation) {
-	if err := os.WriteFile(m.File, m.Original, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: failed to restore %s: %v\n", m.File, err)
-		os.Exit(1)
+func writeOverlay(originalPath, replacementPath string) (string, error) {
+	overlay := struct {
+		Replace map[string]string `json:"Replace"`
+	}{
+		Replace: map[string]string{originalPath: replacementPath},
 	}
+
+	data, err := json.Marshal(overlay)
+	if err != nil {
+		return "", err
+	}
+
+	f, err := os.CreateTemp("", "mutant-overlay-*.json")
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := f.Write(data); err != nil {
+		if e := f.Close(); e != nil {
+			err = fmt.Errorf("%w (close: %w)", err, e)
+		}
+
+		if e := os.Remove(f.Name()); e != nil {
+			err = fmt.Errorf("%w (remove: %w)", err, e)
+		}
+
+		return "", err
+	}
+
+	if err := f.Close(); err != nil {
+		if e := os.Remove(f.Name()); e != nil {
+			err = fmt.Errorf("%w (remove: %w)", err, e)
+		}
+
+		return "", err
+	}
+
+	return f.Name(), nil
 }

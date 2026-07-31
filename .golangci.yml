@@ -1,0 +1,88 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - dogsled
+    - dupl
+    - errcheck
+    - errorlint
+    - fatcontext
+    - gocritic
+    - gocyclo
+    - gosec
+    - govet
+    - grouper
+    - iface
+    - ineffassign
+    - intrange
+    - misspell
+    - modernize
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - perfsprint
+    - prealloc
+    - promlinter
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sloglint
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    - testifylint
+    - thelper
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wsl_v5
+  settings:
+    dupl:
+      threshold: 75
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+    gocyclo:
+      min-complexity: 25
+    revive:
+      severity: warning
+    wsl_v5:
+      force-err-cuddling: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+    perfsprint:
+      errorf: false
+    gosec:
+      excludes:
+        - G204 # Mutation testing tool intentionally runs subprocesses with variable args.
+        - G304 # Mutation testing tool intentionally reads files by variable path.
+        - G306 # Mutated source files need standard read permissions.
+        - G404 # We purposefully use insecure prngs.
+        - G602 # False positive on Go 1.22+ range variables.
+    testifylint:
+      enable-all: true
+  exclusions:
+    rules:
+      - path: pkg/gen/locale_data\.go
+        linters:
+          - dupl
+    paths:
+      - vendor
+      - third_party
+      - ".*_test\\.go" # Comment to include tests.
+
+run:
+  timeout: 5m
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

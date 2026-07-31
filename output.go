@@ -6,24 +6,49 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 )
 
-func PrintTable(w io.Writer, results []MutationResult, verbose bool) {
+type checkedWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (cw *checkedWriter) printf(format string, a ...any) {
+	if cw.err != nil {
+		return
+	}
+
+	_, cw.err = fmt.Fprintf(cw.w, format, a...)
+}
+
+func (cw *checkedWriter) println() {
+	if cw.err != nil {
+		return
+	}
+
+	_, cw.err = fmt.Fprintln(cw.w)
+}
+
+func PrintTable(w io.Writer, results []MutationResult, verbose bool) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "FILE\tLINE\tMUTATOR\tDESCRIPTION\tSTATUS\tTESTS RUN\n")
+	cw := &checkedWriter{w: tw}
+	cw.printf("FILE\tLINE\tMUTATOR\tDESCRIPTION\tSTATUS\tTESTS RUN\n")
 
 	var killed, survived, uncovered, errored int
 
-	for _, r := range results {
+	for i := range results {
+		r := &results[i]
+
 		testNames := strings.Join(r.TestsRun, ", ")
 		if len(r.TestsRun) == 0 {
 			testNames = "(none)"
 		}
 
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+		cw.printf("%s\t%d\t%s\t%s\t%s\t%s\n",
 			r.Mutation.RelFile, r.Mutation.Line,
 			r.Mutation.Mutator, r.Mutation.Description,
 			r.Status, testNames)
@@ -35,10 +60,10 @@ func PrintTable(w io.Writer, results []MutationResult, verbose bool) {
 			survived++
 
 			if verbose && r.TestOutput != "" {
-				fmt.Fprintf(tw, "\t\t\t--- test output ---\t\t\n")
+				cw.printf("\t\t\t--- test output ---\t\t\n")
 
 				for line := range strings.SplitSeq(r.TestOutput, "\n") {
-					fmt.Fprintf(tw, "\t\t\t%s\t\t\n", line)
+					cw.printf("\t\t\t%s\t\t\n", line)
 				}
 			}
 		case Uncovered:
@@ -48,7 +73,13 @@ func PrintTable(w io.Writer, results []MutationResult, verbose bool) {
 		}
 	}
 
-	tw.Flush()
+	if cw.err != nil {
+		return cw.err
+	}
+
+	if err := tw.Flush(); err != nil {
+		return err
+	}
 
 	total := len(results)
 	testable := total - uncovered
@@ -58,28 +89,36 @@ func PrintTable(w io.Writer, results []MutationResult, verbose bool) {
 		score = float64(killed) / float64(testable) * 100
 	}
 
-	fmt.Fprintf(w, "\nScore: %d/%d mutations killed (%.2f%%)\n", killed, testable, score)
+	cw.w = w
+	cw.printf("\nScore: %d/%d mutations killed (%.2f%%)\n", killed, testable, score)
 
 	if survived > 0 {
-		fmt.Fprintf(w, "Survived: %d mutations were not caught by tests\n", survived)
+		cw.printf("Survived: %d mutations were not caught by tests\n", survived)
 	}
 
 	if uncovered > 0 {
-		fmt.Fprintf(w, "Uncovered: %d mutations had no test coverage\n", uncovered)
+		cw.printf("Uncovered: %d mutations had no test coverage\n", uncovered)
 	}
 
 	if errored > 0 {
-		fmt.Fprintf(w, "Errors: %d mutations encountered execution errors\n", errored)
+		cw.printf("Errors: %d mutations encountered execution errors\n", errored)
 	}
 
-	printSurvivors(w, results, verbose)
+	if cw.err != nil {
+		return cw.err
+	}
+
+	printSurvivors(cw, results, verbose)
+
+	return cw.err
 }
 
-func printSurvivors(w io.Writer, results []MutationResult, verbose bool) {
+func printSurvivors(cw *checkedWriter, results []MutationResult, verbose bool) {
 	var survivors []MutationResult
-	for _, r := range results {
-		if r.Status == Survived {
-			survivors = append(survivors, r)
+
+	for i := range results {
+		if results[i].Status == Survived {
+			survivors = append(survivors, results[i])
 		}
 	}
 
@@ -87,34 +126,38 @@ func printSurvivors(w io.Writer, results []MutationResult, verbose bool) {
 		return
 	}
 
-	fmt.Fprintf(w, "\n══════════════════════════════════════\n")
-	fmt.Fprintf(w, " SURVIVING MUTATIONS (%d)\n", len(survivors))
-	fmt.Fprintf(w, "══════════════════════════════════════\n\n")
+	cw.printf("\n══════════════════════════════════════\n")
+	cw.printf(" SURVIVING MUTATIONS (%d)\n", len(survivors))
+	cw.printf("══════════════════════════════════════\n\n")
 
-	for i, r := range survivors {
-		fmt.Fprintf(w, "  %d. %s:%d\n", i+1, r.Mutation.RelFile, r.Mutation.Line)
-		fmt.Fprintf(w, "     Virus:  %s\n", r.Mutation.Mutator)
-		fmt.Fprintf(w, "     Change: %s\n", r.Mutation.Description)
+	for i := range survivors {
+		r := &survivors[i]
+		cw.printf("  %d. %s:%d\n", i+1, r.Mutation.RelFile, r.Mutation.Line)
+		cw.printf("     Virus:  %s\n", r.Mutation.Mutator)
+		cw.printf("     Change: %s\n", r.Mutation.Description)
+
 		if len(r.TestsRun) > 0 {
-			fmt.Fprintf(w, "     Tests:  %s\n", strings.Join(r.TestsRun, ", "))
+			cw.printf("     Tests:  %s\n", strings.Join(r.TestsRun, ", "))
 		}
 
 		if verbose && r.TestOutput != "" {
-			fmt.Fprintf(w, "     Output:\n")
+			cw.printf("     Output:\n")
+
 			for line := range strings.SplitSeq(r.TestOutput, "\n") {
-				fmt.Fprintf(w, "       %s\n", line)
+				cw.printf("       %s\n", line)
 			}
 		}
 
-		fmt.Fprintln(w)
+		cw.println()
 	}
 }
 
-func WriteSurvivors(path string, results []MutationResult) error {
+func WriteSurvivors(path string, results []MutationResult) (retErr error) {
 	var survivors []MutationResult
-	for _, r := range results {
-		if r.Status == Survived {
-			survivors = append(survivors, r)
+
+	for i := range results {
+		if results[i].Status == Survived {
+			survivors = append(survivors, results[i])
 		}
 	}
 
@@ -122,7 +165,12 @@ func WriteSurvivors(path string, results []MutationResult) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+
+	defer func() {
+		if err := f.Close(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
 
 	if strings.HasSuffix(path, ".json") {
 		return writeSurvivorsJSON(f, survivors)
@@ -133,7 +181,8 @@ func WriteSurvivors(path string, results []MutationResult) error {
 
 func writeSurvivorsJSON(w io.Writer, survivors []MutationResult) error {
 	out := make([]jsonMutation, len(survivors))
-	for i, r := range survivors {
+	for i := range survivors {
+		r := &survivors[i]
 		out[i] = jsonMutation{
 			File:        r.Mutation.RelFile,
 			Line:        r.Mutation.Line,
@@ -147,21 +196,27 @@ func writeSurvivorsJSON(w io.Writer, survivors []MutationResult) error {
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
+
 	return enc.Encode(out)
 }
 
 func writeSurvivorsText(w io.Writer, survivors []MutationResult) error {
-	for i, r := range survivors {
-		fmt.Fprintf(w, "%d. %s:%d\n", i+1, r.Mutation.RelFile, r.Mutation.Line)
-		fmt.Fprintf(w, "   Virus:  %s\n", r.Mutation.Mutator)
-		fmt.Fprintf(w, "   Change: %s\n", r.Mutation.Description)
+	cw := &checkedWriter{w: w}
+
+	for i := range survivors {
+		r := &survivors[i]
+		cw.printf("%d. %s:%d\n", i+1, r.Mutation.RelFile, r.Mutation.Line)
+		cw.printf("   Virus:  %s\n", r.Mutation.Mutator)
+		cw.printf("   Change: %s\n", r.Mutation.Description)
+
 		if len(r.TestsRun) > 0 {
-			fmt.Fprintf(w, "   Tests:  %s\n", strings.Join(r.TestsRun, ", "))
+			cw.printf("   Tests:  %s\n", strings.Join(r.TestsRun, ", "))
 		}
-		fmt.Fprintln(w)
+
+		cw.println()
 	}
 
-	return nil
+	return cw.err
 }
 
 type jsonOutput struct {
@@ -172,11 +227,11 @@ type jsonOutput struct {
 
 type jsonMutation struct {
 	File        string   `json:"file"`
-	Line        int      `json:"line"`
 	Mutator     string   `json:"mutator"`
 	Description string   `json:"description"`
-	Status      Status   `json:"status"`
 	TestsRun    []string `json:"tests_run"`
+	Status      Status   `json:"status"`
+	Line        int      `json:"line"`
 	DurationMs  int64    `json:"duration_ms"`
 }
 
@@ -190,10 +245,11 @@ type jsonSummary struct {
 	DurationS float64 `json:"duration_s"`
 }
 
-func PrintJSON(w io.Writer, results []MutationResult, totalDuration time.Duration) {
+func PrintJSON(w io.Writer, results []MutationResult, totalDuration time.Duration) error {
 	out := jsonOutput{}
 
-	for _, r := range results {
+	for i := range results {
+		r := &results[i]
 		jm := jsonMutation{
 			File:        r.Mutation.RelFile,
 			Line:        r.Mutation.Line,
@@ -229,66 +285,75 @@ func PrintJSON(w io.Writer, results []MutationResult, totalDuration time.Duratio
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(out)
+
+	return enc.Encode(out)
 }
 
 // Coverage output
 
 type jsonCoverageEntry struct {
 	File      string   `json:"file"`
+	Tests     []string `json:"tests"`
 	StartLine int      `json:"start_line"`
 	EndLine   int      `json:"end_line"`
-	Tests     []string `json:"tests"`
 }
 
-func PrintCoverageTable(w io.Writer, entries []CoverageEntry) {
+func PrintCoverageTable(w io.Writer, entries []CoverageEntry) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "FILE\tLINES\tTESTS\n")
+	cw := &checkedWriter{w: tw}
+	cw.printf("FILE\tLINES\tTESTS\n")
 
 	for _, e := range entries {
 		lines := fmt.Sprintf("%d-%d", e.StartLine, e.EndLine)
 		if e.StartLine == e.EndLine {
-			lines = fmt.Sprintf("%d", e.StartLine)
+			lines = strconv.Itoa(e.StartLine)
 		}
 
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", e.File, lines, strings.Join(e.Tests, ", "))
+		cw.printf("%s\t%s\t%s\n", e.File, lines, strings.Join(e.Tests, ", "))
 	}
 
-	tw.Flush()
-	fmt.Fprintf(w, "\n%d coverage entries\n", len(entries))
+	if cw.err != nil {
+		return cw.err
+	}
+
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	cw.w = w
+	cw.printf("\n%d coverage entries\n", len(entries))
+
+	return cw.err
 }
 
-func PrintCoverageJSON(w io.Writer, entries []CoverageEntry) {
+func PrintCoverageJSON(w io.Writer, entries []CoverageEntry) error {
 	out := make([]jsonCoverageEntry, len(entries))
 	for i, e := range entries {
-		out[i] = jsonCoverageEntry{
-			File:      e.File,
-			StartLine: e.StartLine,
-			EndLine:   e.EndLine,
-			Tests:     e.Tests,
-		}
+		out[i] = jsonCoverageEntry(e)
 	}
 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(out)
+
+	return enc.Encode(out)
 }
 
 // Plan output
 
 type PlanOutput struct {
-	MutationsByVirus   map[string]int `json:"mutations_by_virus"`
-	TotalMutations     int            `json:"total_mutations"`
-	TotalTests         int            `json:"total_tests"`
-	CoveredMutations   int            `json:"covered_mutations"`
-	AvgTestsPerMutant  float64        `json:"avg_tests_per_mutant"`
-	EstimatedDuration  time.Duration  `json:"-"`
-	EstimatedSeconds   float64        `json:"estimated_seconds"`
+	MutationsByVirus  map[string]int `json:"mutations_by_virus"`
+	TotalMutations    int            `json:"total_mutations"`
+	TotalTests        int            `json:"total_tests"`
+	CoveredMutations  int            `json:"covered_mutations"`
+	AvgTestsPerMutant float64        `json:"avg_tests_per_mutant"`
+	EstimatedDuration time.Duration  `json:"-"`
+	EstimatedSeconds  float64        `json:"estimated_seconds"`
 }
 
-func PrintPlanTable(w io.Writer, p PlanOutput) {
+func PrintPlanTable(w io.Writer, p PlanOutput) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "VIRUS\tMUTATIONS\n")
+	cw := &checkedWriter{w: tw}
+	cw.printf("VIRUS\tMUTATIONS\n")
 
 	viruses := make([]string, 0, len(p.MutationsByVirus))
 	for v := range p.MutationsByVirus {
@@ -298,40 +363,62 @@ func PrintPlanTable(w io.Writer, p PlanOutput) {
 	sort.Strings(viruses)
 
 	for _, v := range viruses {
-		fmt.Fprintf(tw, "%s\t%d\n", v, p.MutationsByVirus[v])
+		cw.printf("%s\t%d\n", v, p.MutationsByVirus[v])
 	}
 
-	tw.Flush()
+	if cw.err != nil {
+		return cw.err
+	}
 
-	fmt.Fprintf(w, "\nTotal mutations:    %d\n", p.TotalMutations)
-	fmt.Fprintf(w, "Covered mutations:  %d\n", p.CoveredMutations)
-	fmt.Fprintf(w, "Total tests:        %d\n", p.TotalTests)
-	fmt.Fprintf(w, "Avg tests/mutation: %.1f\n", p.AvgTestsPerMutant)
-	fmt.Fprintf(w, "Estimated duration: %v\n", p.EstimatedDuration.Round(time.Second))
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	cw.w = w
+	cw.printf("\nTotal mutations:    %d\n", p.TotalMutations)
+	cw.printf("Covered mutations:  %d\n", p.CoveredMutations)
+	cw.printf("Total tests:        %d\n", p.TotalTests)
+	cw.printf("Avg tests/mutation: %.1f\n", p.AvgTestsPerMutant)
+	cw.printf("Estimated duration: %v\n", p.EstimatedDuration.Round(time.Second))
+
+	return cw.err
 }
 
-func PrintPlanJSON(w io.Writer, p PlanOutput) {
+func PrintPlanJSON(w io.Writer, p PlanOutput) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(p)
+
+	return enc.Encode(p)
 }
 
 // Viruses output
 
-func PrintVirusesTable(w io.Writer, names []string) {
+func PrintVirusesTable(w io.Writer, names []string) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(tw, "VIRUS\n")
+	cw := &checkedWriter{w: tw}
+	cw.printf("VIRUS\n")
 
 	for _, n := range names {
-		fmt.Fprintf(tw, "%s\n", n)
+		cw.printf("%s\n", n)
 	}
 
-	tw.Flush()
-	fmt.Fprintf(w, "\n%d viruses available\n", len(names))
+	if cw.err != nil {
+		return cw.err
+	}
+
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	cw.w = w
+	cw.printf("\n%d viruses available\n", len(names))
+
+	return cw.err
 }
 
-func PrintVirusesJSON(w io.Writer, names []string) {
+func PrintVirusesJSON(w io.Writer, names []string) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(names)
+
+	return enc.Encode(names)
 }

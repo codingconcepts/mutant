@@ -21,24 +21,24 @@ type virusRow struct {
 }
 
 type tuiModel struct {
-	phase      mutant.Phase
-	phaseMsg   string
+	startTime  time.Time
+	runErr     error
 	virusStats map[string]*virusRow
+	phaseMsg   string
 	virusOrder []string
+	results    []mutant.MutationResult
+	phase      mutant.Phase
 	completed  int
 	total      int
-	results    []mutant.MutationResult
-	startTime  time.Time
 	done       bool
-	runErr     error
 	verbose    bool
 }
 
 type (
 	progressMsg mutant.MutationProgress
-	runDoneMsg  struct {
-		results []mutant.MutationResult
+	runDoneMsg struct {
 		err     error
+		results []mutant.MutationResult
 	}
 )
 
@@ -185,8 +185,8 @@ func (m tuiModel) View() string {
 
 		var killed, survived, uncovered int
 
-		for _, r := range m.results {
-			switch r.Status {
+		for i := range m.results {
+			switch m.results[i].Status {
 			case mutant.Killed:
 				killed++
 			case mutant.Survived:
@@ -223,17 +223,22 @@ func (m tuiModel) View() string {
 			b.WriteString("\n\n")
 
 			n := 0
-			for _, r := range m.results {
+
+			for i := range m.results {
+				r := &m.results[i]
 				if r.Status != mutant.Survived {
 					continue
 				}
+
 				n++
 				fmt.Fprintf(&b, "  %d. %s:%d\n", n, r.Mutation.RelFile, r.Mutation.Line)
 				fmt.Fprintf(&b, "     Virus:  %s\n", r.Mutation.Mutator)
 				fmt.Fprintf(&b, "     Change: %s\n", r.Mutation.Description)
+
 				if len(r.TestsRun) > 0 {
 					fmt.Fprintf(&b, "     Tests:  %s\n", strings.Join(r.TestsRun, ", "))
 				}
+
 				b.WriteString("\n")
 			}
 		}

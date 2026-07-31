@@ -2,8 +2,8 @@ package mutator
 
 import "go/token"
 
-func NewBitwise() *binaryExprMutator {
-	return &binaryExprMutator{
+func NewBitwise() *tokenSwapMutator {
+	return &tokenSwapMutator{
 		name: "bitwise",
 		mutations: map[token.Token]token.Token{
 			token.AND:     token.OR,
@@ -13,5 +13,6 @@ func NewBitwise() *binaryExprMutator {
 			token.SHL:     token.SHR,
 			token.SHR:     token.SHL,
 		},
+		extract: extractBinaryExpr,
 	}
 }

@@ -36,10 +36,25 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		packages = []string{"./..."}
 	}
 
-	virusFlag, _ := cmd.Flags().GetString("viruses")
-	mode, _ := cmd.Flags().GetString("mode")
-	timeout, _ := cmd.Flags().GetDuration("timeout")
-	workers, _ := cmd.Flags().GetInt("workers")
+	virusFlag, err := cmd.Flags().GetString("viruses")
+	if err != nil {
+		return fmt.Errorf("getting viruses flag: %w", err)
+	}
+
+	mode, err := cmd.Flags().GetString("mode")
+	if err != nil {
+		return fmt.Errorf("getting mode flag: %w", err)
+	}
+
+	timeout, err := cmd.Flags().GetDuration("timeout")
+	if err != nil {
+		return fmt.Errorf("getting timeout flag: %w", err)
+	}
+
+	workers, err := cmd.Flags().GetInt("workers")
+	if err != nil {
+		return fmt.Errorf("getting workers flag: %w", err)
+	}
 
 	if mode != "text" && mode != "json" {
 		return fmt.Errorf("--mode must be 'text' or 'json', got %q", mode)
@@ -105,7 +120,8 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	totalTestRuns := 0
 	fileCosts := make(map[string]time.Duration)
 
-	for _, m := range mutations {
+	for i := range mutations {
+		m := &mutations[i]
 		byVirus[m.Mutator]++
 
 		refs := coverResult.Map.TestsForLine(m.RelFile, m.Line)
@@ -128,7 +144,7 @@ func runPlan(cmd *cobra.Command, args []string) error {
 
 	mutationEstimate := scheduleEstimate(fileCosts, workers)
 	// Parallel go test invocations contend on CPU/IO; scale by observed overhead
-	mutationEstimate = mutationEstimate * 2
+	mutationEstimate *= 2
 	estimated := coverResult.Duration + mutationEstimate
 
 	plan := mutant.PlanOutput{
@@ -142,12 +158,10 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	}
 
 	if mode == "json" {
-		mutant.PrintPlanJSON(os.Stdout, plan)
-	} else {
-		mutant.PrintPlanTable(os.Stdout, plan)
+		return mutant.PrintPlanJSON(os.Stdout, plan)
 	}
 
-	return nil
+	return mutant.PrintPlanTable(os.Stdout, plan)
 }
 
 func scheduleEstimate(fileCosts map[string]time.Duration, workers int) time.Duration {
@@ -161,6 +175,7 @@ func scheduleEstimate(fileCosts map[string]time.Duration, workers int) time.Dura
 	})
 
 	buckets := make([]time.Duration, workers)
+
 	for _, c := range costs {
 		min := 0
 		for i := 1; i < len(buckets); i++ {
@@ -168,6 +183,7 @@ func scheduleEstimate(fileCosts map[string]time.Duration, workers int) time.Dura
 				min = i
 			}
 		}
+
 		buckets[min] += c
 	}
 

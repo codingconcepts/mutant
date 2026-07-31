@@ -2,8 +2,8 @@ package mutator
 
 import "go/token"
 
-func NewArithmeticAssignment() *assignStmtMutator {
-	return &assignStmtMutator{
+func NewArithmeticAssignment() *tokenSwapMutator {
+	return &tokenSwapMutator{
 		name: "arithmetic_assignment",
 		mutations: map[token.Token]token.Token{
 			token.ADD_ASSIGN:     token.ASSIGN,
@@ -18,5 +18,6 @@ func NewArithmeticAssignment() *assignStmtMutator {
 			token.SHR_ASSIGN:     token.ASSIGN,
 			token.AND_NOT_ASSIGN: token.ASSIGN,
 		},
+		extract: extractAssignStmt,
 	}
 }

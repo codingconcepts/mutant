@@ -23,7 +23,10 @@ func init() {
 }
 
 func runViruses(cmd *cobra.Command, args []string) error {
-	mode, _ := cmd.Flags().GetString("mode")
+	mode, err := cmd.Flags().GetString("mode")
+	if err != nil {
+		return fmt.Errorf("getting mode flag: %w", err)
+	}
 
 	if mode != "text" && mode != "json" {
 		return fmt.Errorf("--mode must be 'text' or 'json', got %q", mode)
@@ -35,10 +38,8 @@ func runViruses(cmd *cobra.Command, args []string) error {
 	}
 
 	if mode == "json" {
-		mutant.PrintVirusesJSON(os.Stdout, names)
-	} else {
-		mutant.PrintVirusesTable(os.Stdout, names)
+		return mutant.PrintVirusesJSON(os.Stdout, names)
 	}
 
-	return nil
+	return mutant.PrintVirusesTable(os.Stdout, names)
 }

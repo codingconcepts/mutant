@@ -47,78 +47,59 @@ func ByName(names []string) []mutant.Mutator {
 	return out
 }
 
-type binaryExprMutator struct {
-	name      string
+type tokenSwapMutator struct {
 	mutations map[token.Token]token.Token
+	extract   func(ast.Node) (original token.Token, pos token.Pos, apply func(token.Token), ok bool)
+	name      string
 }
 
-func (m *binaryExprMutator) Name() string { return m.name }
+func (m *tokenSwapMutator) Name() string { return m.name }
 
-func (m *binaryExprMutator) Mutate(fset *token.FileSet, file *ast.File, filePath string, original []byte) []mutant.Mutation {
+func (m *tokenSwapMutator) Mutate(fset *token.FileSet, file *ast.File, filePath string, original []byte) []mutant.Mutation {
 	var out []mutant.Mutation
 
 	ast.Inspect(file, func(n ast.Node) bool {
-		expr, ok := n.(*ast.BinaryExpr)
+		tok, pos, apply, ok := m.extract(n)
 		if !ok {
 			return true
 		}
 
-		mutated, ok := m.mutations[expr.Op]
+		mutated, ok := m.mutations[tok]
 		if !ok {
 			return true
 		}
 
-		originalOp := expr.Op
-		pos := fset.Position(expr.OpPos)
+		originalTok := tok
+		position := fset.Position(pos)
 		out = append(out, mutant.Mutation{
 			File:        filePath,
-			Line:        pos.Line,
-			Mutator:     m.name,
-			Description: "replaced " + originalOp.String() + " with " + mutated.String(),
-			Apply:       func() { expr.Op = mutated },
-			Revert:      func() { expr.Op = originalOp },
-		})
-
-		return true
-	})
-
-	return out
-}
-
-type assignStmtMutator struct {
-	name      string
-	mutations map[token.Token]token.Token
-}
-
-func (m *assignStmtMutator) Name() string { return m.name }
-
-func (m *assignStmtMutator) Mutate(fset *token.FileSet, file *ast.File, filePath string, original []byte) []mutant.Mutation {
-	var out []mutant.Mutation
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		stmt, ok := n.(*ast.AssignStmt)
-		if !ok {
-			return true
-		}
-
-		mutated, ok := m.mutations[stmt.Tok]
-		if !ok {
-			return true
-		}
-
-		originalTok := stmt.Tok
-		pos := fset.Position(stmt.TokPos)
-		out = append(out, mutant.Mutation{
-			File:        filePath,
-			Line:        pos.Line,
+			Line:        position.Line,
 			Mutator:     m.name,
 			Description: "replaced " + originalTok.String() + " with " + mutated.String(),
-			Apply:       func() { stmt.Tok = mutated },
-			Revert:      func() { stmt.Tok = originalTok },
+			Apply:       func() { apply(mutated) },
+			Revert:      func() { apply(originalTok) },
 		})
 
 		return true
 	})
 
 	return out
+}
+
+func extractBinaryExpr(n ast.Node) (token.Token, token.Pos, func(token.Token), bool) {
+	expr, ok := n.(*ast.BinaryExpr)
+	if !ok {
+		return 0, 0, nil, false
+	}
+
+	return expr.Op, expr.OpPos, func(t token.Token) { expr.Op = t }, true
+}
+
+func extractAssignStmt(n ast.Node) (token.Token, token.Pos, func(token.Token), bool) {
+	stmt, ok := n.(*ast.AssignStmt)
+	if !ok {
+		return 0, 0, nil, false
+	}
+
+	return stmt.Tok, stmt.TokPos, func(t token.Token) { stmt.Tok = t }, true
 }

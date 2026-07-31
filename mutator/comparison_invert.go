@@ -2,8 +2,8 @@ package mutator
 
 import "go/token"
 
-func NewComparisonInvert() *binaryExprMutator {
-	return &binaryExprMutator{
+func NewComparisonInvert() *tokenSwapMutator {
+	return &tokenSwapMutator{
 		name: "comparison_invert",
 		mutations: map[token.Token]token.Token{
 			token.GTR: token.LEQ,
@@ -13,5 +13,6 @@ func NewComparisonInvert() *binaryExprMutator {
 			token.EQL: token.NEQ,
 			token.NEQ: token.EQL,
 		},
+		extract: extractBinaryExpr,
 	}
 }

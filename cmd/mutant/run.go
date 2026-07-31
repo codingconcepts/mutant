@@ -41,12 +41,35 @@ func runRun(cmd *cobra.Command, args []string) error {
 		packages = []string{"./..."}
 	}
 
-	virusFlag, _ := cmd.Flags().GetString("viruses")
-	mode, _ := cmd.Flags().GetString("mode")
-	outputFile, _ := cmd.Flags().GetString("output")
-	timeout, _ := cmd.Flags().GetDuration("timeout")
-	verbose, _ := cmd.Flags().GetBool("verbose")
-	workers, _ := cmd.Flags().GetInt("workers")
+	virusFlag, err := cmd.Flags().GetString("viruses")
+	if err != nil {
+		return fmt.Errorf("getting viruses flag: %w", err)
+	}
+
+	mode, err := cmd.Flags().GetString("mode")
+	if err != nil {
+		return fmt.Errorf("getting mode flag: %w", err)
+	}
+
+	outputFile, err := cmd.Flags().GetString("output")
+	if err != nil {
+		return fmt.Errorf("getting output flag: %w", err)
+	}
+
+	timeout, err := cmd.Flags().GetDuration("timeout")
+	if err != nil {
+		return fmt.Errorf("getting timeout flag: %w", err)
+	}
+
+	verbose, err := cmd.Flags().GetBool("verbose")
+	if err != nil {
+		return fmt.Errorf("getting verbose flag: %w", err)
+	}
+
+	workers, err := cmd.Flags().GetInt("workers")
+	if err != nil {
+		return fmt.Errorf("getting workers flag: %w", err)
+	}
 
 	if mode != "text" && mode != "json" && mode != "table" {
 		return fmt.Errorf("--mode must be 'text', 'json', or 'table', got %q", mode)
@@ -104,9 +127,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr)
 
 	if mode == "json" {
-		mutant.PrintJSON(os.Stdout, results, time.Since(start))
+		if err := mutant.PrintJSON(os.Stdout, results, time.Since(start)); err != nil {
+			return err
+		}
 	} else {
-		mutant.PrintTable(os.Stdout, results, verbose)
+		if err := mutant.PrintTable(os.Stdout, results, verbose); err != nil {
+			return err
+		}
 	}
 
 	if outputFile != "" {
@@ -155,7 +182,11 @@ func runWithTUI(cfg mutant.Config, verbose bool, outputFile string) error {
 		return fmt.Errorf("TUI error: %w", err)
 	}
 
-	fm := finalModel.(tuiModel)
+	fm, ok := finalModel.(tuiModel)
+	if !ok {
+		return fmt.Errorf("unexpected model type")
+	}
+
 	if fm.runErr != nil {
 		return fm.runErr
 	}
