@@ -36,7 +36,7 @@ func TestFlipBit(t *testing.T) {
 
 // Weak test: only checks result > input.
 // ShiftLeft(4,1)=8 > 4 passes. But ShiftRight(4,1)=2 > 4 fails,
-// so <<→>> mutation IS caught here. Let's use a value where it survives:
+// so << -> >> mutation IS caught here. Let's use a value where it survives:
 // ShiftLeft(1,0)=1 > 0 is checked, ShiftRight(1,0)=1 > 0 also passes.
 func TestShiftLeft_Weak(t *testing.T) {
 	if ShiftLeft(1, 0) < 1 {

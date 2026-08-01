@@ -2,6 +2,12 @@ package mutator
 
 import "go/token"
 
+// NewComparison creates a mutator that nudges comparison boundary operators:
+//
+// < <-> <=
+// > <-> >=
+//
+// Tests off-by-one coverage in boundary conditions.
 func NewComparison() *tokenSwapMutator {
 	return &tokenSwapMutator{
 		name: "comparison",

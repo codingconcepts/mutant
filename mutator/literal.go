@@ -9,11 +9,13 @@ import (
 	"github.com/codingconcepts/mutant"
 )
 
+// literalMutator applies a numeric transformation to literal values in the
+// AST. Used to implement integer/float increment and decrement mutations.
 type literalMutator struct {
-	transform   func(string) (string, error)
+	transform   func(string) (string, error) // transforms the literal string value
 	mutatorName string
-	verb        string
-	kind        token.Token
+	verb        string      // past-tense verb for the description (e.g. "decremented")
+	kind        token.Token // token.INT or token.FLOAT
 }
 
 func (m *literalMutator) Name() string { return m.mutatorName }
@@ -34,15 +36,11 @@ func (m *literalMutator) Mutate(fset *token.FileSet, file *ast.File, filePath st
 			return true
 		}
 
-		pos := fset.Position(lit.ValuePos)
-		out = append(out, mutant.Mutation{
-			File:        filePath,
-			Line:        pos.Line,
-			Mutator:     m.mutatorName,
-			Description: m.verb + " " + originalValue + " to " + mutatedValue,
-			Apply:       func() { lit.Value = mutatedValue },
-			Revert:      func() { lit.Value = originalValue },
-		})
+		out = append(out, newMutation(filePath, m.mutatorName, fset.Position(lit.ValuePos).Line,
+			fmt.Sprintf("%s %s to %s", m.verb, originalValue, mutatedValue),
+			func() { lit.Value = mutatedValue },
+			func() { lit.Value = originalValue },
+		))
 
 		return true
 	})
@@ -50,66 +48,42 @@ func (m *literalMutator) Mutate(fset *token.FileSet, file *ast.File, filePath st
 	return out
 }
 
+func newNumericLiteralMutator[T int | float64](mutatorName, verb string, kind token.Token, delta T, parse func(string) (T, error), format func(T) string) *literalMutator {
+	return &literalMutator{
+		mutatorName: mutatorName,
+		kind:        kind,
+		verb:        verb,
+		transform: func(s string) (string, error) {
+			v, err := parse(s)
+			if err != nil {
+				return "", err
+			}
+
+			return format(v + delta), nil
+		},
+	}
+}
+
+func formatFloat(f float64) string { return fmt.Sprintf("%v", f) }
+
+func parseFloat(s string) (float64, error) { return strconv.ParseFloat(s, 64) }
+
+// NewFloatDecrement creates a mutator that subtracts 1.0 from float literals.
 func NewFloatDecrement() *literalMutator {
-	return &literalMutator{
-		mutatorName: "float_decrement",
-		kind:        token.FLOAT,
-		verb:        "decremented",
-		transform: func(s string) (string, error) {
-			f, err := strconv.ParseFloat(s, 64)
-			if err != nil {
-				return "", err
-			}
-
-			return fmt.Sprintf("%v", f-1.0), nil
-		},
-	}
+	return newNumericLiteralMutator("float_decrement", "decremented", token.FLOAT, -1.0, parseFloat, formatFloat)
 }
 
+// NewFloatIncrement creates a mutator that adds 1.0 to float literals.
 func NewFloatIncrement() *literalMutator {
-	return &literalMutator{
-		mutatorName: "float_increment",
-		kind:        token.FLOAT,
-		verb:        "incremented",
-		transform: func(s string) (string, error) {
-			f, err := strconv.ParseFloat(s, 64)
-			if err != nil {
-				return "", err
-			}
-
-			return fmt.Sprintf("%v", f+1.0), nil
-		},
-	}
+	return newNumericLiteralMutator("float_increment", "incremented", token.FLOAT, 1.0, parseFloat, formatFloat)
 }
 
+// NewIntegerDecrement creates a mutator that subtracts 1 from integer literals.
 func NewIntegerDecrement() *literalMutator {
-	return &literalMutator{
-		mutatorName: "integer_decrement",
-		kind:        token.INT,
-		verb:        "decremented",
-		transform: func(s string) (string, error) {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				return "", err
-			}
-
-			return strconv.Itoa(v - 1), nil
-		},
-	}
+	return newNumericLiteralMutator("integer_decrement", "decremented", token.INT, -1, strconv.Atoi, strconv.Itoa)
 }
 
+// NewIntegerIncrement creates a mutator that adds 1 to integer literals.
 func NewIntegerIncrement() *literalMutator {
-	return &literalMutator{
-		mutatorName: "integer_increment",
-		kind:        token.INT,
-		verb:        "incremented",
-		transform: func(s string) (string, error) {
-			v, err := strconv.Atoi(s)
-			if err != nil {
-				return "", err
-			}
-
-			return strconv.Itoa(v + 1), nil
-		},
-	}
+	return newNumericLiteralMutator("integer_increment", "incremented", token.INT, 1, strconv.Atoi, strconv.Itoa)
 }

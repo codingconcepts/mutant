@@ -3,7 +3,7 @@ package example
 import "testing"
 
 // Weak test: only checks that a value was found, not that it's the FIRST match.
-// break→continue mutation still returns the correct value (last match happens
+// break -> continue mutation still returns the correct value (last match happens
 // to equal first when only one matches).
 func TestFindFirst_Weak(t *testing.T) {
 	items := []int{1, 2, 3, 4, 5}

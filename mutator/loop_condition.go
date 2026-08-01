@@ -9,6 +9,10 @@ import (
 
 type loopCondition struct{}
 
+// NewLoopCondition creates a mutator that replaces for-loop conditions with
+// a false equivalent (0 != 0), causing the loop body to never execute. Only
+// targets for-loops with binary expression conditions; skips infinite loops
+// (no condition) and range loops.
 func NewLoopCondition() *loopCondition { return &loopCondition{} }
 
 func (m *loopCondition) Name() string { return "loop_condition" }
@@ -36,15 +40,12 @@ func (m *loopCondition) Mutate(fset *token.FileSet, file *ast.File, filePath str
 			Op: token.NEQ,
 			Y:  &ast.BasicLit{Kind: token.INT, Value: "0"},
 		}
-		pos := fset.Position(forStmt.For)
-		out = append(out, mutant.Mutation{
-			File:        filePath,
-			Line:        pos.Line,
-			Mutator:     "loop_condition",
-			Description: "replaced loop condition with false",
-			Apply:       func() { forStmt.Cond = falseCond },
-			Revert:      func() { forStmt.Cond = originalCond },
-		})
+
+		out = append(out, newMutation(filePath, "loop_condition", fset.Position(forStmt.For).Line,
+			"replaced loop condition with false",
+			func() { forStmt.Cond = falseCond },
+			func() { forStmt.Cond = originalCond },
+		))
 
 		return true
 	})

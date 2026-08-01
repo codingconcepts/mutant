@@ -22,10 +22,12 @@ func init() {
 	rootCmd.AddCommand(virusesCmd)
 }
 
+// runViruses is the handler for `mutant viruses`. It lists all available
+// mutation strategies (viruses) from the registry.
 func runViruses(cmd *cobra.Command, args []string) error {
-	mode, err := cmd.Flags().GetString("mode")
+	mode, err := getFlag(cmd.Flags().GetString, "mode")
 	if err != nil {
-		return fmt.Errorf("getting mode flag: %w", err)
+		return err
 	}
 
 	if mode != "text" && mode != "json" {

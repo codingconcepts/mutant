@@ -9,6 +9,10 @@ import (
 
 type cancelNil struct{}
 
+// NewCancelNil creates a mutator that replaces the error argument in
+// context.WithCancelCause cancel function calls with nil. Tests whether
+// cancel cause propagation is properly covered. Skips calls already
+// passing nil.
 func NewCancelNil() *cancelNil { return &cancelNil{} }
 
 func (m *cancelNil) Name() string { return "cancel_nil" }
@@ -46,15 +50,12 @@ func (m *cancelNil) Mutate(fset *token.FileSet, file *ast.File, filePath string,
 
 		originalArg := call.Args[0]
 		nilIdent := &ast.Ident{Name: "nil", NamePos: originalArg.Pos()}
-		pos := fset.Position(call.Lparen)
-		out = append(out, mutant.Mutation{
-			File:        filePath,
-			Line:        pos.Line,
-			Mutator:     "cancel_nil",
-			Description: "replaced cancel cause argument with nil",
-			Apply:       func() { call.Args[0] = nilIdent },
-			Revert:      func() { call.Args[0] = originalArg },
-		})
+
+		out = append(out, newMutation(filePath, "cancel_nil", fset.Position(call.Lparen).Line,
+			"replaced cancel cause argument with nil",
+			func() { call.Args[0] = nilIdent },
+			func() { call.Args[0] = originalArg },
+		))
 
 		return true
 	})
@@ -62,6 +63,10 @@ func (m *cancelNil) Mutate(fset *token.FileSet, file *ast.File, filePath string,
 	return out
 }
 
+// findCancelCauseFuncs scans the AST for assignments from
+// context.WithCancelCause and returns the names of the cancel functions
+// (the second return value). These are the functions whose arguments
+// the cancel_nil mutator will target.
 func findCancelCauseFuncs(file *ast.File) map[string]bool {
 	funcs := make(map[string]bool)
 
@@ -93,12 +98,18 @@ func findCancelCauseFuncs(file *ast.File) map[string]bool {
 		if pkgIdent.Name != "context" || sel.Sel.Name != "WithCancelCause" {
 			return true
 		}
+
 		// context.WithCancelCause returns (ctx, cancel) - cancel is the second LHS
-		if len(assign.Lhs) >= 2 {
-			if ident, ok := assign.Lhs[1].(*ast.Ident); ok {
-				funcs[ident.Name] = true
-			}
+		if len(assign.Lhs) < 2 {
+			return true
 		}
+
+		ident, ok := assign.Lhs[1].(*ast.Ident)
+		if !ok {
+			return true
+		}
+
+		funcs[ident.Name] = true
 
 		return true
 	})

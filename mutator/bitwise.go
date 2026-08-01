@@ -2,6 +2,12 @@ package mutator
 
 import "go/token"
 
+// NewBitwise creates a mutator that swaps bitwise operators:
+//
+// & <-> |
+// ^ -> &
+// &^ -> &
+// << <-> >>
 func NewBitwise() *tokenSwapMutator {
 	return &tokenSwapMutator{
 		name: "bitwise",

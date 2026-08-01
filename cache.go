@@ -3,7 +3,10 @@ package mutant
 import (
 	"crypto/sha256"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,19 +15,44 @@ import (
 )
 
 const (
-	cacheDir       = ".mutant-cache"
-	cacheFile      = "covermap.gob"
+	cacheDir        = ".mutant-cache"
+	cacheFile       = "covermap.gob"
 	resultCacheFile = "results.gob"
 )
 
+// CoverageCache is the gob-serialized form of a CoverageResult, stored in
+// .mutant-cache/covermap.gob. The Key is a SHA-256 hash of all Go source
+// files and go.mod/go.sum; a key mismatch means the cache is stale.
 type CoverageCache struct {
-	Key         string
 	LineToTests map[string]map[int][]TestRef
+	Key         string
 	PerTest     time.Duration
 	Duration    time.Duration
 }
 
+func (c CoverageCache) cacheKey() string { return c.Key }
+
+// ComputeCacheKey produces a SHA-256 hash of all .go files, go.mod, and
+// go.sum in the project directory. Any source change invalidates the cache.
 func ComputeCacheKey(dir string) (string, error) {
+	files, err := collectHashableFiles(dir)
+	if err != nil {
+		return "", err
+	}
+
+	sort.Strings(files)
+
+	h := sha256.New()
+	for _, f := range files {
+		if err := hashFile(h, dir, f); err != nil {
+			return "", err
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func collectHashableFiles(dir string) ([]string, error) {
 	var files []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -33,8 +61,7 @@ func ComputeCacheKey(dir string) (string, error) {
 		}
 
 		if info.IsDir() {
-			base := filepath.Base(path)
-			if base == "vendor" || base == ".git" || base == cacheDir {
+			if isSkippedDir(filepath.Base(path)) {
 				return filepath.SkipDir
 			}
 
@@ -48,7 +75,7 @@ func ComputeCacheKey(dir string) (string, error) {
 		return nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("walking directory: %w", err)
+		return nil, fmt.Errorf("walking directory: %w", err)
 	}
 
 	for _, name := range []string{"go.mod", "go.sum"} {
@@ -58,40 +85,40 @@ func ComputeCacheKey(dir string) (string, error) {
 		}
 	}
 
-	sort.Strings(files)
-
-	h := sha256.New()
-
-	for _, f := range files {
-		rel, _ := filepath.Rel(dir, f)
-		fmt.Fprintf(h, "file:%s\n", rel)
-
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return "", fmt.Errorf("reading %s: %w", f, err)
-		}
-
-		h.Write(data)
-	}
-
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+	return files, nil
 }
 
-func LoadCoverageCache(dir string, key string) (*CoverageResult, bool) {
-	path := filepath.Join(dir, cacheDir, cacheFile)
+func isSkippedDir(base string) bool {
+	return base == "vendor" || base == ".git" || base == cacheDir
+}
 
-	f, err := os.Open(path)
+func hashFile(h io.Writer, dir, f string) error {
+	rel, err := filepath.Rel(dir, f)
 	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-
-	var cache CoverageCache
-	if err := gob.NewDecoder(f).Decode(&cache); err != nil {
-		return nil, false
+		return fmt.Errorf("computing relative path for %s: %w", f, err)
 	}
 
-	if cache.Key != key {
+	if _, err = io.WriteString(h, "file:"+rel+"\n"); err != nil {
+		return fmt.Errorf("hashing file path: %w", err)
+	}
+
+	data, err := os.ReadFile(f)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", f, err)
+	}
+
+	if _, err = h.Write(data); err != nil {
+		return fmt.Errorf("hashing file content: %w", err)
+	}
+
+	return nil
+}
+
+// LoadCoverageCache loads and validates a cached coverage map from disk.
+// Returns false if the cache file doesn't exist or the key doesn't match.
+func LoadCoverageCache(dir string, key string) (*CoverageResult, bool) {
+	cache, ok := loadCache[CoverageCache](filepath.Join(dir, cacheDir, cacheFile), key)
+	if !ok {
 		return nil, false
 	}
 
@@ -102,12 +129,8 @@ func LoadCoverageCache(dir string, key string) (*CoverageResult, bool) {
 	}, true
 }
 
+// SaveCoverageCache persists a coverage map to .mutant-cache/covermap.gob.
 func SaveCoverageCache(dir string, key string, result *CoverageResult) error {
-	cacheDirectory := filepath.Join(dir, cacheDir)
-	if err := os.MkdirAll(cacheDirectory, 0o755); err != nil {
-		return fmt.Errorf("creating cache directory: %w", err)
-	}
-
 	cache := CoverageCache{
 		Key:         key,
 		LineToTests: result.Map.lineToTests,
@@ -115,75 +138,96 @@ func SaveCoverageCache(dir string, key string, result *CoverageResult) error {
 		Duration:    result.Duration,
 	}
 
-	path := filepath.Join(cacheDirectory, cacheFile)
-
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("creating cache file: %w", err)
-	}
-	defer f.Close()
-
-	if err := gob.NewEncoder(f).Encode(cache); err != nil {
-		return fmt.Errorf("encoding cache: %w", err)
-	}
-
-	return nil
+	return saveCache(dir, cacheFile, cache)
 }
 
+// CachedResult stores the outcome of a single mutation test, keyed by
+// "file:line:mutator:description". Stored in .mutant-cache/results.gob.
 type CachedResult struct {
-	Status     Status
-	TestsRun   []string
 	TestOutput string
+	TestsRun   []string
+	Status     Status
 	DurationMs int64
 }
 
+// ResultCache is the gob-serialized form of per-mutation test results.
 type ResultCache struct {
-	Key     string
 	Results map[string]CachedResult
+	Key     string
 }
 
+func (c ResultCache) cacheKey() string { return c.Key }
+
+// LoadResultCache loads cached mutation test results from disk.
+// Returns false if the cache file doesn't exist or the key doesn't match.
 func LoadResultCache(dir string, key string) (map[string]CachedResult, bool) {
-	path := filepath.Join(dir, cacheDir, resultCacheFile)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-
-	var cache ResultCache
-	if err := gob.NewDecoder(f).Decode(&cache); err != nil {
-		return nil, false
-	}
-
-	if cache.Key != key {
+	cache, ok := loadCache[ResultCache](filepath.Join(dir, cacheDir, resultCacheFile), key)
+	if !ok {
 		return nil, false
 	}
 
 	return cache.Results, true
 }
 
+// SaveResultCache persists mutation test results to .mutant-cache/results.gob.
 func SaveResultCache(dir string, key string, results map[string]CachedResult) error {
-	cacheDirectory := filepath.Join(dir, cacheDir)
-	if err := os.MkdirAll(cacheDirectory, 0o755); err != nil {
-		return fmt.Errorf("creating cache directory: %w", err)
-	}
-
 	cache := ResultCache{
 		Key:     key,
 		Results: results,
 	}
 
-	path := filepath.Join(cacheDirectory, resultCacheFile)
+	return saveCache(dir, resultCacheFile, cache)
+}
+
+type keyedCache interface {
+	cacheKey() string
+}
+
+func loadCache[T keyedCache](path string, wantKey string) (T, bool) {
+	var zero T
+
+	f, err := os.Open(path)
+	if err != nil {
+		return zero, false
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Debug("closing cache file", "path", path, "error", err)
+		}
+	}()
+
+	var cache T
+	if err := gob.NewDecoder(f).Decode(&cache); err != nil {
+		return zero, false
+	}
+
+	if cache.cacheKey() != wantKey {
+		return zero, false
+	}
+
+	return cache, true
+}
+
+func saveCache[T any](dir, filename string, cache T) (retErr error) {
+	cacheDirectory := filepath.Join(dir, cacheDir)
+	if err := os.MkdirAll(cacheDirectory, 0o750); err != nil {
+		return fmt.Errorf("creating cache directory: %w", err)
+	}
+
+	path := filepath.Join(cacheDirectory, filename)
 
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("creating result cache file: %w", err)
+		return fmt.Errorf("creating cache file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 
 	if err := gob.NewEncoder(f).Encode(cache); err != nil {
-		return fmt.Errorf("encoding result cache: %w", err)
+		return fmt.Errorf("encoding cache: %w", err)
 	}
 
 	return nil

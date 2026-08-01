@@ -27,7 +27,7 @@ func TestDiv(t *testing.T) {
 }
 
 // Weak test: only checks result is positive.
-// Mod mutation (%→*) survives: Mod(7,3)=1 > 0, and 7*3=21 > 0.
+// Mod mutation (% -> *) survives: Mod(7,3)=1 > 0, and 7*3=21 > 0.
 func TestMod_Weak(t *testing.T) {
 	if Mod(7, 3) <= 0 {
 		t.Error("Mod(7,3) should be positive")
@@ -86,7 +86,9 @@ func TestOffset(t *testing.T) {
 }
 
 // Weak test: only tests with equal inputs.
-// Max(3,3): >→>= mutation doesn't change result (3>=3 is true, returns a=3; same as original).
+// Max(3,3): > -> >= mutation doesn't change result (>=3 is true,
+// returns a=3; same as original).
+//
 // comparison and comparison_invert mutations on > survive here.
 func TestMax_Weak(t *testing.T) {
 	if Max(3, 3) != 3 {
@@ -95,7 +97,7 @@ func TestMax_Weak(t *testing.T) {
 }
 
 // Weak test: Double(0)=0 with both * and / (0*2=0, 0/2=0).
-// arithmetic mutation *→/ survives.
+// arithmetic mutation * -> / survives.
 func TestDouble_Weak(t *testing.T) {
 	if Double(0) != 0 {
 		t.Error("Double(0) should be 0")

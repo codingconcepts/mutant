@@ -2,6 +2,8 @@ package mutator
 
 import "go/token"
 
+// NewArithmeticAssignmentInvert creates a mutator that swaps compound
+// assignment operators with their inverse: += <-> -=, *= <-> /=, %= -> *=.
 func NewArithmeticAssignmentInvert() *tokenSwapMutator {
 	return &tokenSwapMutator{
 		name: "arithmetic_assignment_invert",

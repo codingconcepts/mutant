@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/codingconcepts/mutant"
-	"github.com/codingconcepts/mutant/mutator"
 	"github.com/spf13/cobra"
 )
 
@@ -42,101 +40,39 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 }
 
+// runRun is the handler for `mutant run`. It parses flags, picks the output
+// mode (text/json/table), and either runs in TUI mode or streams results
+// to stdout.
 func runRun(cmd *cobra.Command, args []string) error {
-	packages := args
-	if len(packages) == 0 {
-		packages = []string{"./..."}
+	f, err := parseCommonFlags(cmd, args)
+	if err != nil {
+		return err
 	}
 
-	virusFlag, err := cmd.Flags().GetString("viruses")
+	mode, err := getFlag(cmd.Flags().GetString, "mode")
 	if err != nil {
-		return fmt.Errorf("getting viruses flag: %w", err)
+		return err
 	}
 
-	mode, err := cmd.Flags().GetString("mode")
+	outputFile, err := getFlag(cmd.Flags().GetString, "output")
 	if err != nil {
-		return fmt.Errorf("getting mode flag: %w", err)
+		return err
 	}
 
-	outputFile, err := cmd.Flags().GetString("output")
+	verbose, err := getFlag(cmd.Flags().GetBool, "verbose")
 	if err != nil {
-		return fmt.Errorf("getting output flag: %w", err)
-	}
-
-	timeout, err := cmd.Flags().GetDuration("timeout")
-	if err != nil {
-		return fmt.Errorf("getting timeout flag: %w", err)
-	}
-
-	verbose, err := cmd.Flags().GetBool("verbose")
-	if err != nil {
-		return fmt.Errorf("getting verbose flag: %w", err)
+		return err
 	}
 
 	if verbose {
 		slog.SetDefault(slog.New(log.NewWithOptions(os.Stderr, log.Options{
 			ReportTimestamp: false,
-			Level:          log.DebugLevel,
+			Level:           log.DebugLevel,
 		})))
-	}
-
-	workers, err := cmd.Flags().GetInt("workers")
-	if err != nil {
-		return fmt.Errorf("getting workers flag: %w", err)
-	}
-
-	fastCoverage, err := cmd.Flags().GetBool("fast-coverage")
-	if err != nil {
-		return fmt.Errorf("getting fast-coverage flag: %w", err)
-	}
-
-	noCache, err := cmd.Flags().GetBool("no-cache")
-	if err != nil {
-		return fmt.Errorf("getting no-cache flag: %w", err)
-	}
-
-	diffEnabled, err := cmd.Flags().GetBool("diff")
-	if err != nil {
-		return fmt.Errorf("getting diff flag: %w", err)
-	}
-
-	unstaged, err := cmd.Flags().GetBool("unstaged")
-	if err != nil {
-		return fmt.Errorf("getting unstaged flag: %w", err)
-	}
-
-	diffRef, err := cmd.Flags().GetString("diff-ref")
-	if err != nil {
-		return fmt.Errorf("getting diff-ref flag: %w", err)
-	}
-
-	if diffRef != "" || unstaged {
-		diffEnabled = true
-	}
-
-	var diffSpec *mutant.DiffSpec
-
-	if diffEnabled {
-		spec := mutant.DiffSpec{Unstaged: unstaged}
-		if diffRef != "" {
-			spec.Ref = diffRef
-		}
-
-		diffSpec = &spec
 	}
 
 	if mode != "text" && mode != "json" && mode != "table" {
 		return fmt.Errorf("--mode must be 'text', 'json', or 'table', got %q", mode)
-	}
-
-	var virusNames []string
-	if virusFlag != "" {
-		virusNames = strings.Split(virusFlag, ",")
-	}
-
-	mutators := mutator.ByName(virusNames)
-	if len(mutators) == 0 {
-		return fmt.Errorf("no matching viruses found")
 	}
 
 	dir, err := os.Getwd()
@@ -146,14 +82,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	cfg := mutant.Config{
 		Dir:          dir,
-		Packages:     packages,
-		Mutators:     mutators,
-		Timeout:      timeout,
+		Packages:     f.packages,
+		Mutators:     f.mutators,
+		Timeout:      f.timeout,
 		Verbose:      verbose,
-		Workers:      workers,
-		FastCoverage: fastCoverage,
-		NoCache:      noCache,
-		Diff:         diffSpec,
+		Workers:      f.workers,
+		FastCoverage: f.fastCoverage,
+		NoCache:      f.noCache,
+		Diff:         f.diffSpec,
 	}
 
 	if mode == "table" {
@@ -200,6 +136,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runWithTUI launches a Bubble Tea TUI that displays a live progress table
+// during mutation testing. Falls back to non-interactive mode when stdout
+// is not a terminal.
 func runWithTUI(cfg mutant.Config, verbose bool, outputFile string) error {
 	m := newTUIModel(verbose)
 
@@ -237,7 +176,7 @@ func runWithTUI(cfg mutant.Config, verbose bool, outputFile string) error {
 		return fmt.Errorf("TUI error: %w", err)
 	}
 
-	fm, ok := finalModel.(tuiModel)
+	fm, ok := finalModel.(*tuiModel)
 	if !ok {
 		return fmt.Errorf("unexpected model type")
 	}

@@ -8,7 +8,7 @@ import (
 	"github.com/codingconcepts/mutant"
 )
 
-func appendSideReplace(out []mutant.Mutation, side string, current ast.Expr, set func(ast.Expr), replacement *ast.Ident, op token.Token, filePath string, pos token.Position) []mutant.Mutation {
+func appendSideReplace(out []mutant.Mutation, side string, current ast.Expr, set func(ast.Expr), replacement *ast.Ident, op token.Token, filePath string, line int) []mutant.Mutation {
 	if fmt.Sprint(current) == replacement.Name {
 		return out
 	}
@@ -16,20 +16,21 @@ func appendSideReplace(out []mutant.Mutation, side string, current ast.Expr, set
 	original := current
 	repl := &ast.Ident{Name: replacement.Name, NamePos: original.Pos()}
 
-	return append(out, mutant.Mutation{
-		File:        filePath,
-		Line:        pos.Line,
-		Mutator:     "comparison_replace",
-		Description: "replaced " + side + " side of " + op.String() + " with " + replacement.Name,
-		Apply:       func() { set(repl) },
-		Revert:      func() { set(original) },
-	})
+	return append(out, newMutation(filePath, "comparison_replace", line,
+		fmt.Sprintf("replaced %s side of %s with %s", side, op, replacement.Name),
+		func() { set(repl) },
+		func() { set(original) },
+	))
 }
 
 type comparisonReplace struct {
 	replacements map[token.Token]*ast.Ident
 }
 
+// NewComparisonReplace creates a mutator that replaces operands of logical
+// operators with constants: for &&, each side is replaced with true; for ||,
+// each side is replaced with false. Produces two mutations per expression
+// (one for each side).
 func NewComparisonReplace() *comparisonReplace {
 	return &comparisonReplace{
 		replacements: map[token.Token]*ast.Ident{
@@ -41,6 +42,8 @@ func NewComparisonReplace() *comparisonReplace {
 
 func (m *comparisonReplace) Name() string { return "comparison_replace" }
 
+// Mutate walks the AST for && and || expressions, producing mutations that
+// replace the left or right operand with the corresponding constant.
 func (m *comparisonReplace) Mutate(fset *token.FileSet, file *ast.File, filePath string, original []byte) []mutant.Mutation {
 	var out []mutant.Mutation
 
@@ -55,10 +58,10 @@ func (m *comparisonReplace) Mutate(fset *token.FileSet, file *ast.File, filePath
 			return true
 		}
 
-		pos := fset.Position(expr.OpPos)
+		line := fset.Position(expr.OpPos).Line
 
-		out = appendSideReplace(out, "left", expr.X, func(e ast.Expr) { expr.X = e }, replacement, expr.Op, filePath, pos)
-		out = appendSideReplace(out, "right", expr.Y, func(e ast.Expr) { expr.Y = e }, replacement, expr.Op, filePath, pos)
+		out = appendSideReplace(out, "left", expr.X, func(e ast.Expr) { expr.X = e }, replacement, expr.Op, filePath, line)
+		out = appendSideReplace(out, "right", expr.Y, func(e ast.Expr) { expr.Y = e }, replacement, expr.Op, filePath, line)
 
 		return true
 	})

@@ -2,6 +2,13 @@ package mutator
 
 import "go/token"
 
+// NewComparisonInvert creates a mutator that negates comparison operators:
+//
+// > <-> <=
+// < <-> >=
+// == <-> !=
+//
+// Tests that comparisons are meaningfully covered.
 func NewComparisonInvert() *tokenSwapMutator {
 	return &tokenSwapMutator{
 		name: "comparison_invert",

@@ -1,17 +1,16 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
-	"sort"
-	"strings"
+	"slices"
 	"time"
 
 	"github.com/codingconcepts/mutant"
-	"github.com/codingconcepts/mutant/mutator"
 	"github.com/spf13/cobra"
 )
 
@@ -36,84 +35,22 @@ func init() {
 	rootCmd.AddCommand(planCmd)
 }
 
+// runPlan is the handler for `mutant plan`. It performs a dry run: discovers
+// tests, builds coverage, collects mutations, and estimates duration without
+// actually running any mutations.
 func runPlan(cmd *cobra.Command, args []string) error {
-	packages := args
-	if len(packages) == 0 {
-		packages = []string{"./..."}
-	}
-
-	virusFlag, err := cmd.Flags().GetString("viruses")
+	f, err := parseCommonFlags(cmd, args)
 	if err != nil {
-		return fmt.Errorf("getting viruses flag: %w", err)
+		return err
 	}
 
-	mode, err := cmd.Flags().GetString("mode")
+	mode, err := getFlag(cmd.Flags().GetString, "mode")
 	if err != nil {
-		return fmt.Errorf("getting mode flag: %w", err)
-	}
-
-	timeout, err := cmd.Flags().GetDuration("timeout")
-	if err != nil {
-		return fmt.Errorf("getting timeout flag: %w", err)
-	}
-
-	workers, err := cmd.Flags().GetInt("workers")
-	if err != nil {
-		return fmt.Errorf("getting workers flag: %w", err)
-	}
-
-	fastCoverage, err := cmd.Flags().GetBool("fast-coverage")
-	if err != nil {
-		return fmt.Errorf("getting fast-coverage flag: %w", err)
-	}
-
-	noCache, err := cmd.Flags().GetBool("no-cache")
-	if err != nil {
-		return fmt.Errorf("getting no-cache flag: %w", err)
-	}
-
-	diffEnabled, err := cmd.Flags().GetBool("diff")
-	if err != nil {
-		return fmt.Errorf("getting diff flag: %w", err)
-	}
-
-	unstaged, err := cmd.Flags().GetBool("unstaged")
-	if err != nil {
-		return fmt.Errorf("getting unstaged flag: %w", err)
-	}
-
-	diffRef, err := cmd.Flags().GetString("diff-ref")
-	if err != nil {
-		return fmt.Errorf("getting diff-ref flag: %w", err)
-	}
-
-	if diffRef != "" || unstaged {
-		diffEnabled = true
-	}
-
-	var diffSpec *mutant.DiffSpec
-
-	if diffEnabled {
-		spec := mutant.DiffSpec{Unstaged: unstaged}
-		if diffRef != "" {
-			spec.Ref = diffRef
-		}
-
-		diffSpec = &spec
+		return err
 	}
 
 	if mode != "text" && mode != "json" {
 		return fmt.Errorf("--mode must be 'text' or 'json', got %q", mode)
-	}
-
-	var virusNames []string
-	if virusFlag != "" {
-		virusNames = strings.Split(virusFlag, ",")
-	}
-
-	mutators := mutator.ByName(virusNames)
-	if len(mutators) == 0 {
-		return fmt.Errorf("no matching viruses found")
 	}
 
 	dir, err := os.Getwd()
@@ -125,7 +62,7 @@ func runPlan(cmd *cobra.Command, args []string) error {
 
 	slog.Info("discovering tests")
 
-	tests, err := mutant.DiscoverTests(ctx, dir, packages)
+	tests, err := mutant.DiscoverTests(ctx, dir, f.packages)
 	if err != nil {
 		return fmt.Errorf("discovering tests: %w", err)
 	}
@@ -133,62 +70,34 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	slog.Info("found tests", "count", len(tests))
 
 	if len(tests) == 0 {
-		return fmt.Errorf("no tests found in %v", packages)
+		return fmt.Errorf("no tests found in %v", f.packages)
 	}
 
 	slog.Info("building coverage map")
 
-	var coverResult *mutant.CoverageResult
-
-	if !noCache {
-		cacheKey, keyErr := mutant.ComputeCacheKey(dir)
-		if keyErr == nil {
-			if cached, ok := mutant.LoadCoverageCache(dir, cacheKey); ok {
-				coverResult = cached
-
-				slog.Info("⚡ coverage map loaded from cache (use --no-cache to rebuild)")
-			}
-		}
-	}
-
-	if coverResult == nil {
-		if fastCoverage {
-			coverResult, err = mutant.BuildCoarseCoverageMap(ctx, dir, tests, timeout)
-		} else {
-			coverResult, err = mutant.BuildCoverageMap(ctx, dir, tests, timeout)
-		}
-
-		if err != nil {
-			return fmt.Errorf("building coverage map: %w", err)
-		}
-
-		if !noCache {
-			if cacheKey, keyErr := mutant.ComputeCacheKey(dir); keyErr == nil {
-				if saveErr := mutant.SaveCoverageCache(dir, cacheKey, coverResult); saveErr != nil {
-					slog.Warn("failed to save coverage cache", "error", saveErr)
-				}
-			}
-		}
+	coverResult, err := loadOrBuildCoverage(ctx, dir, tests, f)
+	if err != nil {
+		return err
 	}
 
 	slog.Info("coverage map complete", "duration", coverResult.Duration.Round(time.Millisecond))
 
 	slog.Info("discovering source files")
 
-	files, err := mutant.DiscoverSourceFiles(ctx, dir, packages)
+	files, err := mutant.DiscoverSourceFiles(ctx, dir, f.packages)
 	if err != nil {
 		return fmt.Errorf("discovering source files: %w", err)
 	}
 
 	slog.Info("collecting mutations")
 
-	mutations, err := mutant.CollectMutations(files, dir, mutators)
+	mutations, err := mutant.CollectMutations(files, dir, f.mutators)
 	if err != nil {
 		return fmt.Errorf("collecting mutations: %w", err)
 	}
 
-	if diffSpec != nil {
-		changedLines, diffErr := mutant.ParseGitDiff(ctx, dir, *diffSpec)
+	if f.diffSpec != nil {
+		changedLines, diffErr := mutant.ParseGitDiff(ctx, dir, *f.diffSpec)
 		if diffErr != nil {
 			return fmt.Errorf("parsing git diff: %w", diffErr)
 		}
@@ -198,6 +107,54 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		slog.Info("diff filter applied", "before", before, "after", len(mutations))
 	}
 
+	plan := buildPlanOutput(mutations, tests, coverResult, f.workers)
+
+	if mode == "json" {
+		return mutant.PrintPlanJSON(os.Stdout, plan)
+	}
+
+	return mutant.PrintPlanTable(os.Stdout, plan)
+}
+
+func loadOrBuildCoverage(ctx context.Context, dir string, tests []mutant.TestRef, f commonFlags) (*mutant.CoverageResult, error) {
+	var (
+		cacheKey string
+		keyErr   error
+	)
+
+	if !f.noCache {
+		cacheKey, keyErr = mutant.ComputeCacheKey(dir)
+		if keyErr == nil {
+			if cached, ok := mutant.LoadCoverageCache(dir, cacheKey); ok {
+				slog.Info("⚡ coverage map loaded from cache (use --no-cache to rebuild)")
+				return cached, nil
+			}
+		}
+	}
+
+	buildCoverage := mutant.BuildCoverageMap
+	if f.fastCoverage {
+		buildCoverage = mutant.BuildCoarseCoverageMap
+	}
+
+	coverResult, err := buildCoverage(ctx, dir, tests, f.timeout)
+	if err != nil {
+		return nil, fmt.Errorf("building coverage map: %w", err)
+	}
+
+	if !f.noCache && keyErr == nil {
+		if saveErr := mutant.SaveCoverageCache(dir, cacheKey, coverResult); saveErr != nil {
+			slog.Warn("failed to save coverage cache", "error", saveErr)
+		}
+	}
+
+	return coverResult, nil
+}
+
+// buildPlanOutput computes plan statistics from the collected mutations and
+// coverage map: mutation counts per virus, coverage ratio, and estimated
+// duration based on per-test timing and worker parallelism.
+func buildPlanOutput(mutations []mutant.Mutation, tests []mutant.TestRef, coverResult *mutant.CoverageResult, workers int) mutant.PlanOutput {
 	byVirus := make(map[string]int)
 	covered := 0
 	totalTestRuns := 0
@@ -226,11 +183,12 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	}
 
 	mutationEstimate := scheduleEstimate(fileCosts, workers)
-	// Parallel go test invocations contend on CPU/IO; scale by observed overhead
+	// 2x multiplier accounts for overhead: AST manipulation, file I/O,
+	// process startup, and overlay setup that aren't captured in raw test time.
 	mutationEstimate *= 2
 	estimated := coverResult.Duration + mutationEstimate
 
-	plan := mutant.PlanOutput{
+	return mutant.PlanOutput{
 		MutationsByVirus:  byVirus,
 		TotalMutations:    len(mutations),
 		TotalTests:        len(tests),
@@ -239,43 +197,33 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		EstimatedDuration: estimated,
 		EstimatedSeconds:  estimated.Seconds(),
 	}
-
-	if mode == "json" {
-		return mutant.PrintPlanJSON(os.Stdout, plan)
-	}
-
-	return mutant.PrintPlanTable(os.Stdout, plan)
 }
 
+// scheduleEstimate simulates a greedy scheduling of file costs across worker
+// buckets (largest-first) and returns the max bucket — the estimated
+// wall-clock time for the mutation phase.
 func scheduleEstimate(fileCosts map[string]time.Duration, workers int) time.Duration {
 	costs := make([]time.Duration, 0, len(fileCosts))
 	for _, c := range fileCosts {
 		costs = append(costs, c)
 	}
 
-	sort.Slice(costs, func(i, j int) bool {
-		return costs[i] > costs[j]
+	slices.SortFunc(costs, func(a, b time.Duration) int {
+		return cmp.Compare(b, a)
 	})
 
 	buckets := make([]time.Duration, workers)
 
 	for _, c := range costs {
-		min := 0
+		minIdx := 0
 		for i := 1; i < len(buckets); i++ {
-			if buckets[i] < buckets[min] {
-				min = i
+			if buckets[i] < buckets[minIdx] {
+				minIdx = i
 			}
 		}
 
-		buckets[min] += c
+		buckets[minIdx] += c
 	}
 
-	var max time.Duration
-	for _, b := range buckets {
-		if b > max {
-			max = b
-		}
-	}
-
-	return max
+	return slices.Max(buckets)
 }

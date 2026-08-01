@@ -8,11 +8,6 @@ func TestAccumulate(t *testing.T) {
 	}
 }
 
-// Weak test: only checks result < input.
-// /=→= mutation: ScaleDown(100,10) returns 10 (with /=) or 10 (with =).
-// Wait, v=100, v/=10 → v=10. v=100, v=10 → v=10. Same result!
-// Use different values: ScaleDown(100,5)=20 with /=, =5 with =.
-// Test only checks result < input, so 5 < 100 passes → mutation survives.
 func TestScaleDown_Weak(t *testing.T) {
 	got := ScaleDown(100, 5)
 	if got >= 100 {

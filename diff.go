@@ -3,6 +3,7 @@ package mutant
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -15,13 +16,18 @@ type lineRange struct {
 	End   int
 }
 
+// DiffSpec controls which git diff to parse. When Ref is set, diffs against
+// that ref (e.g. "main", "HEAD~3"). When Unstaged is true, diffs working tree
+// changes. When both are empty, diffs staged (--cached) changes.
 type DiffSpec struct {
-	Ref      string
-	Unstaged bool
+	Ref      string // git ref to diff against (e.g. "main", "HEAD~3")
+	Unstaged bool   // diff unstaged changes instead of staged
 }
 
 var hunkHeader = regexp.MustCompile(`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
 
+// ParseGitDiff runs `git diff` with the given spec and returns a map of
+// changed file paths to the line ranges that were added or modified.
 func ParseGitDiff(ctx context.Context, dir string, spec DiffSpec) (map[string][]lineRange, error) {
 	args := []string{"diff", "--unified=0", "--no-color"}
 
@@ -39,7 +45,8 @@ func ParseGitDiff(ctx context.Context, dir string, spec DiffSpec) (map[string][]
 
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
 			return nil, fmt.Errorf("git diff: %w\n%s", err, exitErr.Stderr)
 		}
 
@@ -65,39 +72,50 @@ func parseDiffOutput(output string) (map[string][]lineRange, error) {
 			continue
 		}
 
-		if strings.HasPrefix(line, "@@") && currentFile != "" {
-			matches := hunkHeader.FindStringSubmatch(line)
-			if matches == nil {
-				continue
-			}
-
-			startLine, err := strconv.Atoi(matches[1])
-			if err != nil {
-				continue
-			}
-
-			count := 1
-			if matches[2] != "" {
-				count, err = strconv.Atoi(matches[2])
-				if err != nil {
-					continue
-				}
-			}
-
-			if count == 0 {
-				continue
-			}
-
-			result[currentFile] = append(result[currentFile], lineRange{
-				Start: startLine,
-				End:   startLine + count - 1,
-			})
+		if currentFile == "" || !strings.HasPrefix(line, "@@") {
+			continue
 		}
+
+		r, ok := parseHunkRange(line)
+		if !ok {
+			continue
+		}
+
+		result[currentFile] = append(result[currentFile], r)
 	}
 
 	return result, scanner.Err()
 }
 
+func parseHunkRange(line string) (lineRange, bool) {
+	matches := hunkHeader.FindStringSubmatch(line)
+	if matches == nil {
+		return lineRange{}, false
+	}
+
+	startLine, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return lineRange{}, false
+	}
+
+	count := 1
+	if matches[2] != "" {
+		count, err = strconv.Atoi(matches[2])
+		if err != nil {
+			return lineRange{}, false
+		}
+	}
+
+	if count == 0 {
+		return lineRange{}, false
+	}
+
+	return lineRange{Start: startLine, End: startLine + count - 1}, true
+}
+
+// FilterMutationsByDiff keeps only mutations whose line falls within a
+// changed range from the diff. Used by --diff mode to limit mutation
+// testing to recently changed code.
 func FilterMutationsByDiff(mutations []Mutation, changedLines map[string][]lineRange) []Mutation {
 	if len(changedLines) == 0 {
 		return nil
@@ -105,15 +123,15 @@ func FilterMutationsByDiff(mutations []Mutation, changedLines map[string][]lineR
 
 	var filtered []Mutation
 
-	for _, m := range mutations {
-		ranges, ok := changedLines[m.RelFile]
+	for i := range mutations {
+		ranges, ok := changedLines[mutations[i].RelFile]
 		if !ok {
 			continue
 		}
 
 		for _, r := range ranges {
-			if m.Line >= r.Start && m.Line <= r.End {
-				filtered = append(filtered, m)
+			if mutations[i].Line >= r.Start && mutations[i].Line <= r.End {
+				filtered = append(filtered, mutations[i])
 				break
 			}
 		}
@@ -122,6 +140,9 @@ func FilterMutationsByDiff(mutations []Mutation, changedLines map[string][]lineR
 	return filtered
 }
 
+// ChangedPackages derives Go package paths from the changed file paths in a
+// diff. Used to scope test discovery to only packages with changes when the
+// user specified `./...` as the package pattern.
 func ChangedPackages(changedLines map[string][]lineRange) []string {
 	pkgSet := make(map[string]struct{})
 

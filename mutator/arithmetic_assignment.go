@@ -2,6 +2,9 @@ package mutator
 
 import "go/token"
 
+// NewArithmeticAssignment creates a mutator that replaces compound assignment
+// operators (+=, -=, *=, etc.) with plain assignment (=), testing whether the
+// accumulation logic is covered by tests.
 func NewArithmeticAssignment() *tokenSwapMutator {
 	return &tokenSwapMutator{
 		name: "arithmetic_assignment",
