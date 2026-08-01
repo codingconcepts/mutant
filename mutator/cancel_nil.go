@@ -93,7 +93,7 @@ func findCancelCauseFuncs(file *ast.File) map[string]bool {
 		if pkgIdent.Name != "context" || sel.Sel.Name != "WithCancelCause" {
 			return true
 		}
-		// context.WithCancelCause returns (ctx, cancel) — cancel is the second LHS
+		// context.WithCancelCause returns (ctx, cancel) - cancel is the second LHS
 		if len(assign.Lhs) >= 2 {
 			if ident, ok := assign.Lhs[1].(*ast.Ident); ok {
 				funcs[ident.Name] = true

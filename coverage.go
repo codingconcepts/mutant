@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,7 +166,7 @@ func DiscoverTests(ctx context.Context, dir string, packages []string) ([]TestRe
 }
 
 func importPathToRelPkg(importPath, dir string) string {
-	modPath, modDir := resolveModuleInfo(dir)
+	modPath, _ := resolveModuleInfo(dir)
 	if modPath == "" {
 		return "./" + importPath
 	}
@@ -174,7 +175,7 @@ func importPathToRelPkg(importPath, dir string) string {
 
 	rel = strings.TrimPrefix(rel, "/")
 	if rel == "" {
-		return modDir
+		return "."
 	}
 
 	return "./" + rel
@@ -284,7 +285,7 @@ func BuildCoverageMap(ctx context.Context, dir string, tests []TestRef, timeout 
 			}
 
 			d := time.Since(testStart)
-			fmt.Fprintf(os.Stderr, "  [%d/%d] %s (%s) ... done (%v)\n", idx+1, len(tests), t.Name, t.Package, d.Round(time.Millisecond))
+			slog.Info("", "progress", fmt.Sprintf("%d/%d", idx+1, len(tests)), "test", t.Name, "package", t.Package, "duration", d.Round(time.Millisecond))
 
 			results <- testResult{test: t, blocks: blocks, duration: d}
 		}(i, t)
@@ -305,7 +306,7 @@ func BuildCoverageMap(ctx context.Context, dir string, tests []TestRef, timeout 
 
 	for r := range results {
 		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: %v\n", r.err)
+			slog.Warn("test coverage failed", "error", r.err)
 			continue
 		}
 
@@ -358,32 +359,84 @@ func BuildCoverageMap(ctx context.Context, dir string, tests []TestRef, timeout 
 }
 
 func buildTestBinaries(ctx context.Context, dir string, tests []TestRef, tmpDir string) (map[string]string, error) {
-	pkgs := make(map[string]struct{})
+	pkgSet := make(map[string]struct{})
+
+	var pkgList []string
+
 	for _, t := range tests {
-		pkgs[t.Package] = struct{}{}
+		if _, ok := pkgSet[t.Package]; !ok {
+			pkgSet[t.Package] = struct{}{}
+			pkgList = append(pkgList, t.Package)
+		}
 	}
 
-	fmt.Fprintf(os.Stderr, "  Building test binaries for %d package(s)...\n", len(pkgs))
+	slog.Info("building test binaries", "packages", len(pkgList))
+
+	type buildResult struct {
+		pkg     string
+		binPath string
+		err     error
+	}
+
+	results := make(chan buildResult, len(pkgList))
+	sem := make(chan struct{}, runtime.NumCPU())
+
+	var wg sync.WaitGroup
+
+	for i, pkg := range pkgList {
+		wg.Add(1)
+
+		go func(idx int, pkg string) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			safeName := strings.ReplaceAll(strings.TrimPrefix(pkg, "./"), "/", "_")
+			if safeName == "" || safeName == "." {
+				safeName = "root"
+			}
+
+			binPath := filepath.Join(tmpDir, safeName+".test")
+
+			cmd := exec.CommandContext(ctx, "go", "test", "-c", "-cover", "-covermode=set", "-o", binPath, pkg)
+			cmd.Dir = dir
+
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				results <- buildResult{pkg: pkg, err: fmt.Errorf("building test binary for %s: %w\n%s", pkg, err, out)}
+				return
+			}
+
+			slog.Info("built test binary", "progress", fmt.Sprintf("%d/%d", idx+1, len(pkgList)), "package", pkg)
+
+			results <- buildResult{pkg: pkg, binPath: binPath}
+		}(i, pkg)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
 	binaries := make(map[string]string)
 
-	for pkg := range pkgs {
-		safeName := strings.ReplaceAll(strings.TrimPrefix(pkg, "./"), "/", "_")
-		if safeName == "" || safeName == "." {
-			safeName = "root"
+	var firstErr error
+
+	for r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+
+			continue
 		}
 
-		binPath := filepath.Join(tmpDir, safeName+".test")
+		binaries[r.pkg] = r.binPath
+	}
 
-		cmd := exec.CommandContext(ctx, "go", "test", "-c", "-cover", "-covermode=set", "-o", binPath, pkg)
-		cmd.Dir = dir
-
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return nil, fmt.Errorf("building test binary for %s: %w\n%s", pkg, err, out)
-		}
-
-		binaries[pkg] = binPath
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	return binaries, nil
@@ -416,6 +469,153 @@ func importPathToFilePath(importQualified, modPath, modDir, baseDir string) stri
 	}
 
 	return relPath
+}
+
+func BuildCoarseCoverageMap(ctx context.Context, dir string, tests []TestRef, timeout time.Duration) (_ *CoverageResult, retErr error) {
+	start := time.Now()
+
+	tmpDir, err := os.MkdirTemp("", "mutant-cover-*")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(tmpDir); rmErr != nil && retErr == nil {
+			retErr = fmt.Errorf("removing temp dir: %w", rmErr)
+		}
+	}()
+
+	pkgTests := make(map[string][]TestRef)
+	for _, t := range tests {
+		pkgTests[t.Package] = append(pkgTests[t.Package], t)
+	}
+
+	binaries, err := buildTestBinaries(ctx, dir, tests, tmpDir)
+	if err != nil {
+		return nil, fmt.Errorf("building test binaries: %w", err)
+	}
+
+	modPath, modDir := resolveModuleInfo(dir)
+
+	type pkgResult struct {
+		pkg      string
+		tests    []TestRef
+		blocks   []coverBlock
+		err      error
+		duration time.Duration
+	}
+
+	totalPkgs := len(pkgTests)
+	results := make(chan pkgResult, totalPkgs)
+	sem := make(chan struct{}, runtime.NumCPU())
+
+	var wg sync.WaitGroup
+
+	idx := 0
+
+	for pkg, testsInPkg := range pkgTests {
+		wg.Add(1)
+
+		go func(i int, pkg string, testsInPkg []TestRef) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			testStart := time.Now()
+
+			binPath := binaries[pkg]
+			profilePath := filepath.Join(tmpDir, fmt.Sprintf("cover_pkg_%d.out", i))
+
+			pkgTimeout := timeout * time.Duration(len(testsInPkg))
+
+			testCtx, cancel := context.WithTimeout(ctx, pkgTimeout)
+			defer cancel()
+
+			cmd := exec.CommandContext(
+				testCtx, binPath,
+				"-test.coverprofile="+profilePath,
+				"-test.count=1",
+			)
+			cmd.Dir = resolvePkgDir(dir, pkg)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error {
+				return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				results <- pkgResult{pkg: pkg, err: fmt.Errorf("running tests in %s: %w\n%s", pkg, err, output)}
+				return
+			}
+
+			blocks, err := parseCoverProfile(profilePath)
+			if err != nil {
+				results <- pkgResult{pkg: pkg, err: fmt.Errorf("parsing coverage for %s: %w", pkg, err)}
+				return
+			}
+
+			d := time.Since(testStart)
+			slog.Info("package coverage complete", "progress", fmt.Sprintf("%d/%d", i+1, totalPkgs), "package", pkg, "tests", len(testsInPkg), "duration", d.Round(time.Millisecond))
+
+			results <- pkgResult{pkg: pkg, tests: testsInPkg, blocks: blocks, duration: d}
+		}(idx, pkg, testsInPkg)
+
+		idx++
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	cm := &CoverageMap{
+		lineToTests: make(map[string]map[int][]TestRef),
+	}
+
+	var totalTime time.Duration
+
+	successfulPkgs := 0
+
+	for r := range results {
+		if r.err != nil {
+			slog.Warn("package coverage failed", "error", r.err)
+			continue
+		}
+
+		totalTime += r.duration
+		successfulPkgs++
+
+		for _, block := range r.blocks {
+			if block.count == 0 {
+				continue
+			}
+
+			relFile := importPathToFilePath(block.file, modPath, modDir, dir)
+
+			lines, ok := cm.lineToTests[relFile]
+			if !ok {
+				lines = make(map[int][]TestRef)
+				cm.lineToTests[relFile] = lines
+			}
+
+			for line := block.startLine; line <= block.endLine; line++ {
+				lines[line] = r.tests
+			}
+		}
+	}
+
+	elapsed := time.Since(start)
+
+	var perTest time.Duration
+	if len(tests) > 0 && successfulPkgs > 0 {
+		perTest = totalTime / time.Duration(len(tests))
+	}
+
+	return &CoverageResult{
+		Map:      cm,
+		Duration: elapsed,
+		PerTest:  perTest,
+	}, nil
 }
 
 type coverBlock struct {

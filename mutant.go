@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"log/slog"
 	"go/format"
 	"go/parser"
 	"go/printer"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,13 +98,16 @@ type MutationProgress struct {
 }
 
 type Config struct {
-	OnProgress func(MutationProgress)
-	Dir        string
-	Packages   []string
-	Mutators   []Mutator
-	Timeout    time.Duration
-	Workers    int
-	Verbose    bool
+	OnProgress   func(MutationProgress)
+	Dir          string
+	Packages     []string
+	Mutators     []Mutator
+	Timeout      time.Duration
+	Workers      int
+	Verbose      bool
+	FastCoverage bool
+	NoCache      bool
+	Diff         *DiffSpec
 }
 
 var (
@@ -128,7 +133,7 @@ func RestoreAllActive() {
 
 	for _, m := range activeMutations {
 		if err := os.WriteFile(m.File, m.Original, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "FATAL: failed to restore %s: %v\n", m.File, err)
+			slog.Error("failed to restore file", "file", m.File, "error", err)
 		}
 	}
 }
@@ -143,19 +148,53 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 					testNames = "(none)"
 				}
 
-				fmt.Fprintf(os.Stderr, "[%d/%d] %s:%d %s %q ... %s (%s, %v)\n",
-					p.Completed, p.Total,
-					p.Mutation.RelFile, p.Mutation.Line, p.Mutation.Mutator, p.Mutation.Description,
-					p.Result.Status, testNames, p.Result.Duration.Round(time.Millisecond))
+				attrs := []any{
+					"progress", fmt.Sprintf("%d/%d", p.Completed, p.Total),
+					"file", p.Mutation.RelFile, "line", p.Mutation.Line,
+					"mutator", p.Mutation.Mutator, "description", p.Mutation.Description,
+					"status", p.Result.Status, "tests", testNames,
+					"duration", p.Result.Duration.Round(time.Millisecond),
+				}
+				if p.Result.Status == Killed {
+					slog.Debug("mutation result", attrs...)
+				} else {
+					slog.Info("mutation result", attrs...)
+				}
 			} else if p.Message != "" {
-				fmt.Fprintf(os.Stderr, "%s\n", p.Message)
+				slog.Info(p.Message)
+			}
+		}
+	}
+
+	packages := cfg.Packages
+
+	var changedLines map[string][]lineRange
+
+	if cfg.Diff != nil {
+		var diffErr error
+
+		changedLines, diffErr = ParseGitDiff(ctx, cfg.Dir, *cfg.Diff)
+		if diffErr != nil {
+			return nil, fmt.Errorf("parsing git diff: %w", diffErr)
+		}
+
+		if len(changedLines) == 0 {
+			progress(MutationProgress{Phase: PhaseDone, Message: "No changed lines found", Completed: 0, Total: 0})
+			return nil, nil
+		}
+
+		if hasWildcard(packages) {
+			scopedPkgs := ChangedPackages(changedLines)
+			if len(scopedPkgs) > 0 {
+				packages = scopedPkgs
+				progress(MutationProgress{Phase: PhaseDiscoverTests, Message: fmt.Sprintf("Diff scoped to %d package(s)", len(packages))})
 			}
 		}
 	}
 
 	progress(MutationProgress{Phase: PhaseDiscoverTests, Message: "Discovering tests..."})
 
-	tests, err := DiscoverTests(ctx, cfg.Dir, cfg.Packages)
+	tests, err := DiscoverTests(ctx, cfg.Dir, packages)
 	if err != nil {
 		return nil, fmt.Errorf("discovering tests: %w", err)
 	}
@@ -163,14 +202,47 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 	progress(MutationProgress{Phase: PhaseDiscoverTests, Message: fmt.Sprintf("Found %d tests", len(tests))})
 
 	if len(tests) == 0 {
-		return nil, fmt.Errorf("no tests found in %v", cfg.Packages)
+		return nil, fmt.Errorf("no tests found in %v", packages)
 	}
 
 	progress(MutationProgress{Phase: PhaseBuildCoverage, Message: "Building coverage map..."})
 
-	coverResult, err := BuildCoverageMap(ctx, cfg.Dir, tests, cfg.Timeout)
-	if err != nil {
-		return nil, fmt.Errorf("building coverage map: %w", err)
+	var coverResult *CoverageResult
+	var cacheKey string
+	var cachedResults map[string]CachedResult
+
+	if !cfg.NoCache {
+		if key, keyErr := ComputeCacheKey(cfg.Dir); keyErr == nil {
+			cacheKey = key
+
+			if cached, ok := LoadCoverageCache(cfg.Dir, cacheKey); ok {
+				coverResult = cached
+
+				progress(MutationProgress{Phase: PhaseBuildCoverage, Message: "⚡ Coverage map loaded from cache (use --no-cache to rebuild)"})
+			}
+
+			if results, ok := LoadResultCache(cfg.Dir, cacheKey); ok {
+				cachedResults = results
+			}
+		}
+	}
+
+	if coverResult == nil {
+		if cfg.FastCoverage {
+			coverResult, err = BuildCoarseCoverageMap(ctx, cfg.Dir, tests, cfg.Timeout)
+		} else {
+			coverResult, err = BuildCoverageMap(ctx, cfg.Dir, tests, cfg.Timeout)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("building coverage map: %w", err)
+		}
+
+		if !cfg.NoCache && cacheKey != "" {
+			if saveErr := SaveCoverageCache(cfg.Dir, cacheKey, coverResult); saveErr != nil {
+				slog.Warn("failed to save coverage cache", "error", saveErr)
+			}
+		}
 	}
 
 	coverMap := coverResult.Map
@@ -178,7 +250,7 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 
 	progress(MutationProgress{Phase: PhaseDiscoverFiles, Message: "Discovering source files..."})
 
-	files, err := DiscoverSourceFiles(ctx, cfg.Dir, cfg.Packages)
+	files, err := DiscoverSourceFiles(ctx, cfg.Dir, packages)
 	if err != nil {
 		return nil, fmt.Errorf("discovering source files: %w", err)
 	}
@@ -192,11 +264,22 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 		return nil, fmt.Errorf("collecting mutations: %w", err)
 	}
 
+	if changedLines != nil {
+		before := len(mutations)
+		mutations = FilterMutationsByDiff(mutations, changedLines)
+		progress(MutationProgress{Phase: PhaseCollectMutations, Message: fmt.Sprintf("Diff filter: %d → %d mutations", before, len(mutations))})
+
+		if len(mutations) == 0 {
+			progress(MutationProgress{Phase: PhaseDone, Message: "No mutations in changed lines", Completed: 0, Total: 0})
+			return nil, nil
+		}
+	}
+
 	progress(MutationProgress{Phase: PhaseCollectMutations, Message: fmt.Sprintf("Found %d mutations\n", len(mutations))})
 
 	workers := cfg.Workers
 	if workers <= 0 {
-		workers = runtime.NumCPU()
+		workers = max(1, runtime.NumCPU()/2)
 	}
 
 	fileGroups := make(map[string][]int)
@@ -223,13 +306,63 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			mutatedFile, err := os.CreateTemp("", "mutant-*.go")
+			if err != nil {
+				for _, idx := range indices {
+					results[idx] = MutationResult{
+						Mutation:   mutations[idx],
+						Status:     Errored,
+						TestOutput: fmt.Sprintf("creating temp file: %v", err),
+					}
+
+					completed.Add(1)
+				}
+
+				return
+			}
+
+			mutatedPath := mutatedFile.Name()
+			mutatedFile.Close()
+
+			defer os.Remove(mutatedPath)
+
+			overlayPath, err := writeOverlay(mutations[indices[0]].File, mutatedPath)
+			if err != nil {
+				for _, idx := range indices {
+					results[idx] = MutationResult{
+						Mutation:   mutations[idx],
+						Status:     Errored,
+						TestOutput: fmt.Sprintf("creating overlay file: %v", err),
+					}
+
+					completed.Add(1)
+				}
+
+				return
+			}
+
+			defer os.Remove(overlayPath)
+
 			for _, idx := range indices {
 				if ctx.Err() != nil {
 					break
 				}
 
 				m := mutations[idx]
-				result := executeMutation(ctx, m, coverMap, cfg)
+
+				var result MutationResult
+				if cr, ok := cachedResults[mutationCacheKey(m)]; ok {
+					result = MutationResult{
+						Mutation:   m,
+						Status:     cr.Status,
+						TestsRun:   cr.TestsRun,
+						TestOutput: cr.TestOutput,
+						Duration:   time.Duration(cr.DurationMs) * time.Millisecond,
+					}
+				} else {
+					result = executeMutationWithFiles(ctx, m, coverMap, cfg, mutatedPath, overlayPath)
+				}
+
 				results[idx] = result
 
 				n := int(completed.Add(1))
@@ -245,6 +378,23 @@ func Run(ctx context.Context, cfg Config) ([]MutationResult, error) {
 	}
 
 	wg.Wait()
+
+	if !cfg.NoCache && cacheKey != "" {
+		toCache := make(map[string]CachedResult, len(results))
+		for i := range results {
+			r := &results[i]
+			toCache[mutationCacheKey(r.Mutation)] = CachedResult{
+				Status:     r.Status,
+				TestsRun:   r.TestsRun,
+				TestOutput: r.TestOutput,
+				DurationMs: r.Duration.Milliseconds(),
+			}
+		}
+		if saveErr := SaveResultCache(cfg.Dir, cacheKey, toCache); saveErr != nil {
+			slog.Warn("failed to save result cache", "error", saveErr)
+		}
+	}
+
 	progress(MutationProgress{Phase: PhaseDone, Message: "Done", Completed: total, Total: total})
 
 	return results, nil
@@ -317,7 +467,7 @@ func CollectMutations(files []string, baseDir string, mutators []Mutator) ([]Mut
 	return all, nil
 }
 
-func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg Config) MutationResult {
+func executeMutationWithFiles(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg Config, mutatedPath, overlayPath string) MutationResult {
 	start := time.Now()
 
 	tests := coverMap.TestsForLine(m.RelFile, m.Line)
@@ -332,8 +482,7 @@ func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg
 	m.Apply()
 	defer m.Revert()
 
-	mutatedPath, err := writeMutatedToTemp(m)
-	if err != nil {
+	if err := writeMutatedToFile(mutatedPath, m); err != nil {
 		return MutationResult{
 			Mutation:   m,
 			Status:     Errored,
@@ -341,27 +490,11 @@ func executeMutation(ctx context.Context, m Mutation, coverMap *CoverageMap, cfg
 			TestOutput: err.Error(),
 		}
 	}
-	defer func() {
-		if rmErr := os.Remove(mutatedPath); rmErr != nil && !os.IsNotExist(rmErr) {
-			fmt.Fprintf(os.Stderr, "warning: removing temp file: %v\n", rmErr)
-		}
-	}()
 
-	overlayPath, err := writeOverlay(m.File, mutatedPath)
-	if err != nil {
-		return MutationResult{
-			Mutation:   m,
-			Status:     Errored,
-			Duration:   time.Since(start),
-			TestOutput: err.Error(),
-		}
-	}
-	defer func() {
-		if err := os.Remove(overlayPath); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "warning: removing temp file: %v\n", err)
-		}
-	}()
+	return runTests(ctx, m, tests, cfg, overlayPath, start)
+}
 
+func runTests(ctx context.Context, m Mutation, tests []TestRef, cfg Config, overlayPath string, start time.Time) MutationResult {
 	testsByPkg := groupTestsByPackage(tests)
 	killed := false
 
@@ -421,6 +554,20 @@ func groupTestsByPackage(tests []TestRef) map[string][]string {
 	return m
 }
 
+func writeMutatedToFile(path string, m Mutation) error {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, m.FileSet, m.ASTFile); err != nil {
+		return fmt.Errorf("printing mutated AST: %w", err)
+	}
+
+	formatted, err := format.Source(buf.Bytes())
+	if err != nil {
+		return fmt.Errorf("formatting mutated source: %w", err)
+	}
+
+	return os.WriteFile(path, formatted, 0o644)
+}
+
 func writeMutatedToTemp(m Mutation) (string, error) {
 	var buf bytes.Buffer
 	if err := printer.Fprint(&buf, m.FileSet, m.ASTFile); err != nil {
@@ -458,6 +605,19 @@ func writeMutatedToTemp(m Mutation) (string, error) {
 	}
 
 	return f.Name(), nil
+}
+
+func mutationCacheKey(m Mutation) string {
+	return m.RelFile + ":" + strconv.Itoa(m.Line) + ":" + m.Mutator + ":" + m.Description
+}
+
+func hasWildcard(packages []string) bool {
+	for _, p := range packages {
+		if strings.HasSuffix(p, "...") {
+			return true
+		}
+	}
+	return false
 }
 
 func writeOverlay(originalPath, replacementPath string) (string, error) {

@@ -13,6 +13,7 @@ mutant
 *.out
 *.coverprofile
 profile.cov
+.mutant-cache/
 
 # Go workspace file
 go.work

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/log"
 	"github.com/mattn/go-isatty"
 
 	"github.com/codingconcepts/mutant"
@@ -31,7 +33,12 @@ func init() {
 	runCmd.Flags().StringP("output", "o", "", "write surviving mutations to file (format from extension: .json or text)")
 	runCmd.Flags().DurationP("timeout", "t", 10*time.Second, "per-test timeout")
 	runCmd.Flags().Bool("verbose", false, "show test output for survived mutations")
-	runCmd.Flags().IntP("workers", "w", 1, "parallel workers (0 to use all CPUs)")
+	runCmd.Flags().IntP("workers", "w", 0, "parallel workers (0 = NumCPU/2)")
+	runCmd.Flags().Bool("fast-coverage", false, "use package-level coverage (faster build, runs more tests per mutation)")
+	runCmd.Flags().Bool("no-cache", false, "force rebuild of coverage map, ignoring cache")
+	runCmd.Flags().Bool("diff", false, "filter mutations to changed lines only (staged changes by default)")
+	runCmd.Flags().Bool("unstaged", false, "diff unstaged changes instead of staged; implies --diff")
+	runCmd.Flags().String("diff-ref", "", "git ref to diff against (e.g. HEAD~3, main); implies --diff")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -66,9 +73,56 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("getting verbose flag: %w", err)
 	}
 
+	if verbose {
+		slog.SetDefault(slog.New(log.NewWithOptions(os.Stderr, log.Options{
+			ReportTimestamp: false,
+			Level:          log.DebugLevel,
+		})))
+	}
+
 	workers, err := cmd.Flags().GetInt("workers")
 	if err != nil {
 		return fmt.Errorf("getting workers flag: %w", err)
+	}
+
+	fastCoverage, err := cmd.Flags().GetBool("fast-coverage")
+	if err != nil {
+		return fmt.Errorf("getting fast-coverage flag: %w", err)
+	}
+
+	noCache, err := cmd.Flags().GetBool("no-cache")
+	if err != nil {
+		return fmt.Errorf("getting no-cache flag: %w", err)
+	}
+
+	diffEnabled, err := cmd.Flags().GetBool("diff")
+	if err != nil {
+		return fmt.Errorf("getting diff flag: %w", err)
+	}
+
+	unstaged, err := cmd.Flags().GetBool("unstaged")
+	if err != nil {
+		return fmt.Errorf("getting unstaged flag: %w", err)
+	}
+
+	diffRef, err := cmd.Flags().GetString("diff-ref")
+	if err != nil {
+		return fmt.Errorf("getting diff-ref flag: %w", err)
+	}
+
+	if diffRef != "" || unstaged {
+		diffEnabled = true
+	}
+
+	var diffSpec *mutant.DiffSpec
+
+	if diffEnabled {
+		spec := mutant.DiffSpec{Unstaged: unstaged}
+		if diffRef != "" {
+			spec.Ref = diffRef
+		}
+
+		diffSpec = &spec
 	}
 
 	if mode != "text" && mode != "json" && mode != "table" {
@@ -91,12 +145,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := mutant.Config{
-		Dir:      dir,
-		Packages: packages,
-		Mutators: mutators,
-		Timeout:  timeout,
-		Verbose:  verbose,
-		Workers:  workers,
+		Dir:          dir,
+		Packages:     packages,
+		Mutators:     mutators,
+		Timeout:      timeout,
+		Verbose:      verbose,
+		Workers:      workers,
+		FastCoverage: fastCoverage,
+		NoCache:      noCache,
+		Diff:         diffSpec,
 	}
 
 	if mode == "table" {
@@ -111,7 +168,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Fprintf(os.Stderr, "\nInterrupted, cleaning up...\n")
+		slog.Warn("interrupted, cleaning up")
 		cancel()
 		mutant.RestoreAllActive()
 		os.Exit(1)
@@ -123,8 +180,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	fmt.Fprintln(os.Stderr)
 
 	if mode == "json" {
 		if err := mutant.PrintJSON(os.Stdout, results, time.Since(start)); err != nil {

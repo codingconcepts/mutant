@@ -331,6 +331,38 @@ func TestStatusMarshalJSON(t *testing.T) {
 	}
 }
 
+func TestMutationCacheKey(t *testing.T) {
+	m := Mutation{
+		RelFile:     "calc.go",
+		Line:        10,
+		Mutator:     "arithmetic",
+		Description: "replaced + with -",
+	}
+
+	got := mutationCacheKey(m)
+	want := "calc.go:10:arithmetic:replaced + with -"
+	if got != want {
+		t.Errorf("mutationCacheKey() = %q, want %q", got, want)
+	}
+}
+
+func TestMutationCacheKey_DifferentMutationsDifferentKeys(t *testing.T) {
+	m1 := Mutation{RelFile: "calc.go", Line: 10, Mutator: "arithmetic", Description: "replaced + with -"}
+	m2 := Mutation{RelFile: "calc.go", Line: 10, Mutator: "arithmetic", Description: "replaced + with *"}
+	m3 := Mutation{RelFile: "calc.go", Line: 11, Mutator: "arithmetic", Description: "replaced + with -"}
+
+	k1 := mutationCacheKey(m1)
+	k2 := mutationCacheKey(m2)
+	k3 := mutationCacheKey(m3)
+
+	if k1 == k2 {
+		t.Error("different descriptions should produce different keys")
+	}
+	if k1 == k3 {
+		t.Error("different lines should produce different keys")
+	}
+}
+
 func containsSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
 }

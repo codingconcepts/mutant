@@ -18,7 +18,7 @@ func TestCanVote(t *testing.T) {
 
 // Weak test: only checks true cases.
 // Replacing right operand with false: weekend||false = weekend, so
-// IsWeekendOrHoliday(true, true) still returns true — mutation survives.
+// IsWeekendOrHoliday(true, true) still returns true - mutation survives.
 func TestIsWeekendOrHoliday_Weak(t *testing.T) {
 	if !IsWeekendOrHoliday(true, false) {
 		t.Error("weekend should be day off")

@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
+	"github.com/charmbracelet/log"
 	"github.com/spf13/cobra"
 )
 
@@ -14,6 +16,10 @@ var rootCmd = &cobra.Command{
 }
 
 func main() {
+	slog.SetDefault(slog.New(log.NewWithOptions(os.Stderr, log.Options{
+		ReportTimestamp: false,
+	})))
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
